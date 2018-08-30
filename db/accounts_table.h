@@ -32,11 +32,11 @@ public:
     bool exist(string name);
 
     void add_account_control(const chain::vector<chain::permission_level_weight>& controlling_accounts,
-                            const account_name& name, const permission_name& permission,
+                            const std::string& name, const permission_name& permission,
                             const std::chrono::milliseconds& now);
-    void remove_account_control( const account_name& name, const permission_name& permission );
-    void add_pub_keys(const vector<chain::key_weight>& keys, const account_name& name, const permission_name& permission);
-    void remove_pub_keys(const account_name& name, const permission_name& permission);
+    void remove_account_control( const std::string& name, const permission_name& permission );
+    void add_pub_keys(const vector<chain::key_weight>& keys, const std::string& name, const permission_name& permission);
+    void remove_pub_keys(const std::string& name, const permission_name& permission);
 
 private:
     std::shared_ptr<connection_pool> m_pool;

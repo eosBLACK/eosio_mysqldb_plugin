@@ -69,10 +69,11 @@ void accounts_table::create()
                 "permission VARCHAR(12)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE utf8mb4_general_ci;");
                 
         con.execute("CREATE TABLE accounts_control("
-                "controlled_account VARCHAR(12) PRIMARY KEY, "
-                "controlled_permission VARCHAR(10) PRIMARY KEY, "
+                "controlled_account VARCHAR(12), "
+                "controlled_permission VARCHAR(10), "
                 "controlling_account VARCHAR(12),"
-                "created_at DATETIME DEFAULT NOW()) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE utf8mb4_general_ci;");
+                "created_at DATETIME DEFAULT NOW(),"
+                "PRIMARY KEY (controlled_account,controlled_permission)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE utf8mb4_general_ci;");
 
         con.execute("CREATE INDEX idx_controlling_account ON accounts_control (controlling_account);");
     }
@@ -101,19 +102,22 @@ void accounts_table::add(string account_name)
 }
 
 void accounts_table::add_account_control( const vector<chain::permission_level_weight>& controlling_accounts,
-                                        const account_name& name, const permission_name& permission,
+                                        const std::string& name, const permission_name& permission,
                                         const std::chrono::milliseconds& now)
 {
-    if(controlling_accounts.empty()) return;
+    if(controlling_accounts.empty()) {
+        return;
+    }
 
     zdbcpp::Connection con = m_pool->get_connection();
     assert(con);
     for( const auto& controlling_account : controlling_accounts ) {
         try {
+            std::string conacc_name = controlling_account.permission.actor.to_string();
             zdbcpp::PreparedStatement pre = con.prepareStatement("INSERT INTO accounts_control (controlled_account,controlled_permission,controlling_account,created_at) VALUES (?,?,?,?)");
-            pre.setString(1,name.to_string().c_str());
+            pre.setString(1,name.c_str());
             pre.setString(2,permission.to_string().c_str());
-            pre.setString(3,controlling_account.permission.actor.to_string().c_str());
+            pre.setString(3,conacc_name.c_str());
             pre.setDouble(4,now.count());
 
             pre.execute();
@@ -125,13 +129,13 @@ void accounts_table::add_account_control( const vector<chain::permission_level_w
     
 }
 
-void accounts_table::remove_account_control( const account_name& name, const permission_name& permission )
+void accounts_table::remove_account_control( const std::string& name, const permission_name& permission )
 {
     zdbcpp::Connection con = m_pool->get_connection();
     assert(con);
     try {
         zdbcpp::PreparedStatement pre = con.prepareStatement("DELETE FROM accounts_control WHERE controlled_account = ? AND controlled_permission = ? ");
-        pre.setString(1,name.to_string().c_str());
+        pre.setString(1,name.c_str());
         pre.setString(2,permission.to_string().c_str());
         
         pre.execute();
@@ -142,28 +146,29 @@ void accounts_table::remove_account_control( const account_name& name, const per
     
 }
 
-void accounts_table::add_pub_keys(const vector<chain::key_weight>& keys, const account_name& name, const permission_name& permission)
+void accounts_table::add_pub_keys(const vector<chain::key_weight>& keys, const std::string& name, const permission_name& permission)
 {
     zdbcpp::Connection con = m_pool->get_connection();
     assert(con);
 
     for (const auto& key_weight : keys) {
+        std::string key = static_cast<std::string>(key_weight.key);
         zdbcpp::PreparedStatement pre = con.prepareStatement("INSERT INTO accounts_keys(account, public_key, permission) VALUES (?,?,?) ");
-        pre.setString(1,name.to_string().c_str()),
-        pre.setString(2,key_weight.key.operator string().c_str());
+        pre.setString(1,name.c_str()),
+        pre.setString(2,key.c_str());
         pre.setString(3,permission.to_string().c_str());
 
         pre.execute();
     }
 }
 
-void accounts_table::remove_pub_keys(const account_name& name, const permission_name& permission)
+void accounts_table::remove_pub_keys(const std::string& name, const permission_name& permission)
 {
     zdbcpp::Connection con = m_pool->get_connection();
     assert(con);
 
     zdbcpp::PreparedStatement pre = con.prepareStatement("DELETE FROM accounts_keys WHERE account = ? AND permission = ?  ");
-    pre.setString(1,name.to_string().c_str()),
+    pre.setString(1,name.c_str()),
     pre.setString(2,permission.to_string().c_str());
 
     pre.execute();
@@ -193,23 +198,23 @@ void accounts_table::update_account(chain::action action)
 
             add(newacc.name.to_string());
 
-            add_pub_keys(newacc.owner.keys, newacc.name, chain::config::owner_name);            
-            add_account_control(newacc.owner.accounts, newacc.name, chain::config::owner_name, now);
-            add_pub_keys(newacc.active.keys, newacc.name, chain::config::active_name);            
-            add_account_control(newacc.active.accounts, newacc.name, chain::config::active_name, now);
+            add_pub_keys(newacc.owner.keys, newacc.name.to_string(), chain::config::owner_name);            
+            add_account_control(newacc.owner.accounts, newacc.name.to_string(), chain::config::owner_name, now);
+            add_pub_keys(newacc.active.keys, newacc.name.to_string(), chain::config::active_name);            
+            add_account_control(newacc.active.accounts, newacc.name.to_string(), chain::config::active_name, now);
         } else if( action.name == chain::updateauth::get_name() ) {
             auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::microseconds{fc::time_point::now().time_since_epoch().count()} );
             const auto update = action.data_as<chain::updateauth>();
-            remove_pub_keys(update.account, update.permission);
-            remove_account_control(update.account, update.permission);
-            add_pub_keys(update.auth.keys, update.account, update.permission);
-            add_account_control(update.auth.accounts, update.account, update.permission, now);
+            remove_pub_keys(update.account.to_string(), update.permission);
+            remove_account_control(update.account.to_string(), update.permission);
+            add_pub_keys(update.auth.keys, update.account.to_string(), update.permission);
+            add_account_control(update.auth.accounts, update.account.to_string(), update.permission, now);
 
         } else if( action.name == chain::deleteauth::get_name() ) {
             const auto del = action.data_as<chain::deleteauth>();
-            remove_pub_keys( del.account, del.permission );
-            remove_account_control(del.account, del.permission);
+            remove_pub_keys( del.account.to_string(), del.permission );
+            remove_account_control(del.account.to_string(), del.permission);
         }
         
     }
