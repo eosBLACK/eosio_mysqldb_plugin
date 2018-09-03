@@ -13,6 +13,8 @@
 #include <boost/chrono.hpp>
 #include <fc/log/logger.hpp>
 
+#include <future>
+
 #include "zdbcpp.h"
 
 using namespace zdbcpp;
@@ -61,19 +63,19 @@ void accounts_table::create()
                     "name VARCHAR(12) PRIMARY KEY,"
                     "abi JSON DEFAULT NULL,"
                     "created_at DATETIME DEFAULT NOW(),"
-                    "updated_at DATETIME DEFAULT NOW()) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE utf8mb4_general_ci;");
+                    "updated_at DATETIME DEFAULT NOW()) ENGINE=MyISAM DEFAULT CHARSET=utf8mb4 COLLATE utf8mb4_general_ci;");
 
         con.execute("CREATE TABLE accounts_keys("
                 "account VARCHAR(12),"
                 "public_key VARCHAR(53),"
-                "permission VARCHAR(12)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE utf8mb4_general_ci;");
+                "permission VARCHAR(12)) ENGINE=MyISAM DEFAULT CHARSET=utf8mb4 COLLATE utf8mb4_general_ci;");
                 
         con.execute("CREATE TABLE accounts_control("
                 "controlled_account VARCHAR(12), "
                 "controlled_permission VARCHAR(10), "
                 "controlling_account VARCHAR(12),"
                 "created_at DATETIME DEFAULT NOW(),"
-                "PRIMARY KEY (controlled_account,controlled_permission)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE utf8mb4_general_ci;");
+                "PRIMARY KEY (controlled_account,controlled_permission)) ENGINE=MyISAM DEFAULT CHARSET=utf8mb4 COLLATE utf8mb4_general_ci;");
 
         con.execute("CREATE INDEX idx_controlling_account ON accounts_control (controlling_account);");
     }
@@ -109,6 +111,9 @@ void accounts_table::add_account_control( const vector<chain::permission_level_w
         return;
     }
 
+    auto now_time = std::chrono::seconds{fc::time_point::now().time_since_epoch().count()};
+    const auto created_at = now_time.count();
+
     zdbcpp::Connection con = m_pool->get_connection();
     assert(con);
     for( const auto& controlling_account : controlling_accounts ) {
@@ -118,7 +123,7 @@ void accounts_table::add_account_control( const vector<chain::permission_level_w
             pre.setString(1,name.c_str());
             pre.setString(2,permission.to_string().c_str());
             pre.setString(3,conacc_name.c_str());
-            pre.setDouble(4,now.count());
+            pre.setDouble(4,created_at);
 
             pre.execute();
         }

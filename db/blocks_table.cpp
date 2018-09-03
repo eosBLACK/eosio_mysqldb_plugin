@@ -43,7 +43,7 @@ void blocks_table::create()
             "version INT NOT NULL DEFAULT 0,"
             "new_producers JSON DEFAULT NULL,"
             "num_transactions INT DEFAULT 0,"
-            "confirmed INT, UNIQUE KEY block_number (block_number)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE utf8mb4_general_ci;");
+            "confirmed INT, UNIQUE KEY block_number (block_number)) ENGINE=MyISAM DEFAULT CHARSET=utf8mb4 COLLATE utf8mb4_general_ci;");
 
         con.execute("CREATE INDEX idx_blocks_producer ON blocks (producer);");
         con.execute("CREATE INDEX idx_blocks_number ON blocks (block_number);");

@@ -1,6 +1,8 @@
 #include "actions_table.h"
 #include "zdbcpp.h"
 
+#include <boost/chrono.hpp>
+
 #include <eosio/chain/eosio_contract.hpp>
 #include <eosio/chain/config.hpp>
 #include <eosio/chain/exceptions.hpp>
@@ -12,6 +14,7 @@
 #include <fc/variant.hpp>
 
 #include <iostream>
+#include <future>
 
 using namespace zdbcpp;
 namespace eosio {
@@ -55,6 +58,7 @@ void actions_table::create()
     try {
         con.execute("CREATE TABLE actions("
                 "id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,"
+                "receiver VARCHAR(12),"
                 "account VARCHAR(12),"
                 "transaction_id VARCHAR(64),"
                 "seq SMALLINT,"
@@ -63,7 +67,7 @@ void actions_table::create()
                 "created_at DATETIME DEFAULT NOW(),"
                 "hex_data LONGTEXT, "
                 "data JSON "
-                ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE utf8mb4_general_ci;");
+                ") ENGINE=MyISAM DEFAULT CHARSET=utf8mb4 COLLATE utf8mb4_general_ci;");
 
         con.execute("CREATE INDEX idx_actions_account ON actions (account);");
         con.execute("CREATE INDEX idx_actions_tx_id ON actions (transaction_id);");
@@ -72,8 +76,8 @@ void actions_table::create()
         con.execute("CREATE TABLE actions_accounts("
                 "actor VARCHAR(12),"
                 "permission VARCHAR(12),"
-                "action_id INT NOT NULL "
-                ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE utf8mb4_general_ci;");
+                "action_id INT NOT NULL, "
+                "PRIMARY KEY (actor, action_id)) ENGINE=MyISAM DEFAULT CHARSET=utf8mb4 COLLATE utf8mb4_general_ci;");
 
         con.execute("CREATE INDEX idx_actions_actor ON actions_accounts (actor);");
         con.execute("CREATE INDEX idx_actions_action_id ON actions_accounts (action_id);");
@@ -81,21 +85,21 @@ void actions_table::create()
         con.execute("CREATE TABLE tokens("
                 "account VARCHAR(13),"
                 "symbol VARCHAR(10),"
-                "amount DOUBLE(64,4)"
-                ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE utf8mb4_general_ci;"); // TODO: other tokens could have diff format.
-
+                "contract_owner VARCHAR(13),"
+                "PRIMARY KEY (account,symbol,contract_owner) "
+                ") ENGINE=MyISAM DEFAULT CHARSET=utf8mb4 COLLATE utf8mb4_general_ci;"); // TODO: other tokens could have diff format.
         con.execute("CREATE INDEX idx_tokens_account ON tokens (account);");
 
         con.execute("CREATE TABLE votes("
                 "account VARCHAR(13) PRIMARY KEY,"
                 "votes JSON"
-                ", UNIQUE KEY account (account)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE utf8mb4_general_ci;");
+                ", UNIQUE KEY account (account)) ENGINE=MyISAM DEFAULT CHARSET=utf8mb4 COLLATE utf8mb4_general_ci;");
 
         con.execute("CREATE TABLE stakes("
                 "account VARCHAR(13) PRIMARY KEY,"
                 "cpu REAL(14,4),"
                 "net REAL(14,4) "
-                ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE utf8mb4_general_ci;");
+                ") ENGINE=MyISAM DEFAULT CHARSET=utf8mb4 COLLATE utf8mb4_general_ci;");
     }
     catch(std::exception& e){
         wlog(e.what());
@@ -104,14 +108,16 @@ void actions_table::create()
     m_pool->release_connection(con);
 }
 
-void actions_table::add(chain::action action, chain::transaction_id_type transaction_id, fc::time_point_sec transaction_time, int32_t seq)
+int actions_table::add(int parent_action_id, std::string receiver, chain::action action, chain::transaction_id_type transaction_id, int32_t seq)
 {
     chain::abi_def abi;
     std::string abi_def_account;
     chain::abi_serializer abis;
     
+    auto transaction_time = std::chrono::seconds{fc::time_point::now().time_since_epoch().count()};
+
     const auto transaction_id_str = transaction_id.str();
-    const auto expiration = boost::chrono::seconds{transaction_time.sec_since_epoch()}.count();
+    const auto expiration = transaction_time.count();
     string m_account_name = action.account.to_string();
     int max_field_size = 6500000;
 
@@ -126,25 +132,33 @@ void actions_table::add(chain::action action, chain::transaction_id_type transac
                     zdbcpp::Connection con = m_pool->get_connection();
                     assert(con);
 
-                    zdbcpp::PreparedStatement pre = con.prepareStatement("INSERT INTO actions(account, seq, created_at, name, data, transaction_id) VALUES (?, ?, FROM_UNIXTIME(?), ?, ?, ?) ");
+                    zdbcpp::PreparedStatement pre = con.prepareStatement("INSERT INTO actions(parent, receiver, account, seq, created_at, name, data, transaction_id) VALUES (?, ?, ?, ?, FROM_UNIXTIME(?), ?, ?, ?) ");
             
-                    pre.setString(1,m_account_name.c_str());
-                    pre.setInt(2,seq);
-                    pre.setDouble(3,expiration);
-                    pre.setString(4,action.name.to_string().c_str());
-                    pre.setString(5,json_str.c_str());
-                    pre.setString(6,transaction_id_str.c_str());
+                    pre.setInt(1,parent_action_id);
+                    pre.setString(2,receiver.c_str());
+                    pre.setString(3,m_account_name.c_str());
+                    pre.setInt(4,seq);
+                    pre.setDouble(5,expiration);
+                    pre.setString(6,action.name.to_string().c_str());
+                    pre.setString(7,json_str.c_str());
+                    pre.setString(8,transaction_id_str.c_str());
 
                     pre.execute();
                     
+                    zdbcpp::ResultSet rset = con.executeQuery("SELECT LAST_INSERT_ID() as action_id FROM actions ");
+                    assert(rset);
+                    rset.next();
+                    int last_action_id = rset.getIntByName("action_id");
+
                     for (const auto& auth : action.authorization) {
                         string m_actor_name = auth.actor.to_string();
-                        zdbcpp::PreparedStatement pre = con.prepareStatement("INSERT INTO actions_accounts(action_id, actor, permission) VALUES (LAST_INSERT_ID(), ?, ?) ");
-                        pre.setString(1,m_actor_name.c_str());
-                        pre.setString(2,auth.permission.to_string().c_str());
+                        zdbcpp::PreparedStatement pre = con.prepareStatement("INSERT INTO actions_accounts(action_id, actor, permission) VALUES (?, ?, ?) ");
+                        pre.setInt(1,last_action_id);
+                        pre.setString(2,m_actor_name.c_str());
+                        pre.setString(3,auth.permission.to_string().c_str());
                         pre.execute();
                     }
-                    return;
+                    return last_action_id;
                 } catch( fc::exception& e ) {
                     ilog( "Unable to convert action abi_def to json for ${n}", ("n", setabi.account.to_string()));
                 }
@@ -169,7 +183,7 @@ void actions_table::add(chain::action action, chain::transaction_id_type transac
             } else if (action.account == chain::config::system_account_name) {
                 abi = chain::eosio_contract_abi(abi);
             } else {
-                return; // no ABI no party. Should we still store it?
+                return 0;
             }
             static const fc::microseconds abi_serializer_max_time(1000000); // 1 second
             abis.set_abi(abi, abi_serializer_max_time);      
@@ -177,32 +191,36 @@ void actions_table::add(chain::action action, chain::transaction_id_type transac
             auto abi_data = abis.binary_to_variant(abis.get_action_type(action.name), action.data, abi_serializer_max_time);
             string json = fc::json::to_string(abi_data);
             
-            // boost::uuids::random_generator gen;
-            // boost::uuids::uuid id = gen();
-            // std::string action_id = boost::uuids::to_string(id);
-
-            zdbcpp::PreparedStatement pre = con.prepareStatement("INSERT INTO actions(account, seq, created_at, name, data, transaction_id) VALUES (?, ?, FROM_UNIXTIME(?), ?, ?, ?) ");
+            zdbcpp::PreparedStatement pre = con.prepareStatement("INSERT INTO actions(parent, receiver, account, seq, created_at, name, data, transaction_id) VALUES (?, ?, ?, ?, FROM_UNIXTIME(?), ?, ?, ?) ");
             
-            pre.setString(1,m_account_name.c_str());
-            pre.setInt(2,seq);
-            pre.setDouble(3,expiration);
-            pre.setString(4,action.name.to_string().c_str());
-            pre.setString(5,json.c_str());
-            pre.setString(6,transaction_id_str.c_str());
+            pre.setInt(1,parent_action_id);
+            pre.setString(2,receiver.c_str());
+            pre.setString(3,m_account_name.c_str());
+            pre.setInt(4,seq);
+            pre.setDouble(5,expiration);
+            pre.setString(6,action.name.to_string().c_str());
+            pre.setString(7,json.c_str());
+            pre.setString(8,transaction_id_str.c_str());
 
             pre.execute();
-            
+
+            zdbcpp::ResultSet rset = con.executeQuery("SELECT LAST_INSERT_ID() as action_id FROM actions ");
+            assert(rset);
+            rset.next();
+            int last_action_id = rset.getIntByName("action_id");
+
             for (const auto& auth : action.authorization) {
                 string m_actor_name = auth.actor.to_string();
-                zdbcpp::PreparedStatement pre = con.prepareStatement("INSERT INTO actions_accounts(action_id, actor, permission) VALUES (LAST_INSERT_ID(), ?, ?) ");
-                pre.setString(1,m_actor_name.c_str());
-                pre.setString(2,auth.permission.to_string().c_str());
+                zdbcpp::PreparedStatement pre = con.prepareStatement("INSERT INTO actions_accounts(action_id, actor, permission) VALUES (?, ?, ?) ");
+                pre.setInt(1,last_action_id);
+                pre.setString(2,m_actor_name.c_str());
+                pre.setString(3,auth.permission.to_string().c_str());
                 pre.execute();
             }
 
             parse_actions(action, abi_data);
 
-            return;
+            return last_action_id;
         }       
     } catch( std::exception& e ) {
         ilog( "Unable to convert action.data to ABI: ${s}::${n}, std what: ${e}",
@@ -222,95 +240,56 @@ void actions_table::add(chain::action action, chain::transaction_id_type transac
     zdbcpp::Connection con = m_pool->get_connection();
     assert(con);
 
-    zdbcpp::PreparedStatement pre = con.prepareStatement("INSERT INTO actions(account, seq, created_at, name, hex_data, transaction_id) VALUES (?, ?, FROM_UNIXTIME(?), ?, ?, ?) ");
+    zdbcpp::PreparedStatement pre = con.prepareStatement("INSERT INTO actions(parent, receiver, account, seq, created_at, name, hex_data, transaction_id) VALUES (?, ?, ?, ?, FROM_UNIXTIME(?), ?, ?, ?) ");
 
-    pre.setString(1,m_account_name.c_str());
-    pre.setInt(2,seq);
-    pre.setDouble(3,expiration);
-    pre.setString(4,action.name.to_string().c_str());
-    pre.setString(5,m_hex_data.c_str());
-    pre.setString(6,transaction_id_str.c_str());
+    pre.setInt(1,parent_action_id);
+    pre.setString(2,receiver.c_str());
+    pre.setString(3,m_account_name.c_str());
+    pre.setInt(4,seq);
+    pre.setDouble(5,expiration);
+    pre.setString(6,action.name.to_string().c_str());
+    pre.setString(7,m_hex_data.c_str());
+    pre.setString(8,transaction_id_str.c_str());
 
     pre.execute();
+
+    zdbcpp::ResultSet rset = con.executeQuery("SELECT LAST_INSERT_ID() as action_id FROM actions ");
+    assert(rset);
+    rset.next();
+    int last_action_id = rset.getIntByName("action_id");
+
     for (const auto& auth : action.authorization) {
         string m_actor_name = auth.actor.to_string();
-        zdbcpp::PreparedStatement pre = con.prepareStatement("INSERT INTO actions_accounts(action_id, actor, permission) VALUES (LAST_INSERT_ID(), ?, ?) ");
-        pre.setString(1,m_actor_name.c_str());
-        pre.setString(2,auth.permission.to_string().c_str());
+        zdbcpp::PreparedStatement pre = con.prepareStatement("INSERT INTO actions_accounts(action_id, actor, permission) VALUES (?, ?, ?) ");
+        pre.setInt(1,last_action_id);
+        pre.setString(2,m_actor_name.c_str());
+        pre.setString(3,auth.permission.to_string().c_str());
         pre.execute();
     }
 
     m_pool->release_connection(con);
+
+    return last_action_id;
 }
 
 void actions_table::parse_actions(chain::action action, fc::variant abi_data)
 {
     try {
-        // TODO: move all  + catch // public keys update // stake / voting
-        if (action.name == N(issue)) {
+        if (action.name == N(issue) || action.name == N(transfer)) {
             auto to_name = abi_data["to"].as<chain::name>().to_string();
             auto asset_quantity = abi_data["quantity"].as<chain::asset>();
-            int exist;
+            auto contract_owner = action.account.to_string();
+            int exist = 0;
 
             zdbcpp::Connection con = m_pool->get_connection();
             assert(con);
 
-            zdbcpp::ResultSet rset = con.executeQuery("SELECT COUNT(*) as cnt FROM tokens WHERE account = ? AND symbol = ?",to_name,asset_quantity.get_symbol().name());
-            assert(rset);
-            rset.next();
-            exist = rset.getIntByName("cnt");
-                    
-            if (exist > 0) {
-                zdbcpp::PreparedStatement pre = con.prepareStatement("UPDATE tokens SET amount = amount + ? WHERE account = ? AND symbol = ?");
-                pre.setDouble(1,asset_quantity.to_real());
-                pre.setString(2,to_name.c_str());
-                pre.setString(3,asset_quantity.get_symbol().name().c_str());
-                
-                pre.execute();
-            } else {
-                zdbcpp::PreparedStatement pre = con.prepareStatement("INSERT INTO tokens(account, amount, symbol) VALUES (?, ?, ?)");
-                pre.setString(1,to_name.c_str());
-                pre.setDouble(2,asset_quantity.to_real());
-                pre.setString(3,asset_quantity.get_symbol().name().c_str());
-                
-                pre.execute();
-            }
-        }
-
-        if (action.name == N(transfer)) {
-            auto from_name = abi_data["from"].as<chain::name>().to_string();
-            auto to_name = abi_data["to"].as<chain::name>().to_string();
-            auto asset_quantity = abi_data["quantity"].as<chain::asset>();
-            int exist;
-
-            zdbcpp::Connection con = m_pool->get_connection();
-            assert(con);
-
-            zdbcpp::ResultSet rset = con.executeQuery("SELECT COUNT(*) as cnt FROM tokens WHERE account = ? AND symbol = ?",to_name,asset_quantity.get_symbol().name());
-            assert(rset);
-            rset.next();
-            exist = rset.getIntByName("cnt");
-
-            if (exist > 0) {
-                zdbcpp::PreparedStatement pre = con.prepareStatement("UPDATE tokens SET amount = amount + ? WHERE account = ? AND symbol = ?");
-                pre.setDouble(1,asset_quantity.to_real());
-                pre.setString(2,to_name.c_str());
-                pre.setString(3,asset_quantity.get_symbol().name().c_str());
-
-                pre.execute();
-            } else {
-                zdbcpp::PreparedStatement pre = con.prepareStatement("INSERT INTO tokens(account, amount, symbol) VALUES (?, ?, ?)");
-                pre.setString(1,to_name.c_str());
-                pre.setDouble(2,asset_quantity.to_real());
-                pre.setString(3,asset_quantity.get_symbol().name().c_str());
-                
-                pre.execute();
-            }
-
-            zdbcpp::PreparedStatement pre = con.prepareStatement("UPDATE tokens SET amount = amount + ? WHERE account = ? AND symbol = ?");
-            pre.setDouble(1,asset_quantity.to_real());
-            pre.setString(2,to_name.c_str());
-            pre.setString(3,asset_quantity.get_symbol().name().c_str());
+            // ignore if exists
+            zdbcpp::PreparedStatement pre = con.prepareStatement("INSERT IGNORE INTO tokens(account, symbol, contract_owner) VALUES (?, ?, ?)");
+            pre.setString(1,to_name.c_str());
+            pre.setString(2,asset_quantity.get_symbol().name().c_str());
+            pre.setString(3,contract_owner.c_str());
+            
             pre.execute();
         }
 
@@ -318,87 +297,38 @@ void actions_table::parse_actions(chain::action action, fc::variant abi_data)
             return;
         }
 
-        if (action.name == N(voteproducer)) {
-            auto voter = abi_data["voter"].as<chain::name>().to_string();
-            string votes = fc::json::to_string(abi_data["producers"]);
+        // if (action.name == N(voteproducer)) {
+        //     auto voter = abi_data["voter"].as<chain::name>().to_string();
+        //     string votes = fc::json::to_string(abi_data["producers"]);
 
-            zdbcpp::Connection con = m_pool->get_connection();
-            assert(con);
+        //     zdbcpp::Connection con = m_pool->get_connection();
+        //     assert(con);
 
-            zdbcpp::PreparedStatement pre = con.prepareStatement("INSERT INTO votes(account, votes) VALUES (?, ?) ON DUPLICATE KEY UPDATE votes = ?; ");
-            pre.setString(1,voter.c_str());
-            pre.setString(2,votes.c_str());
-            pre.setString(3,votes.c_str());
+        //     zdbcpp::PreparedStatement pre = con.prepareStatement("INSERT INTO votes(account, votes) VALUES (?, ?) ON DUPLICATE KEY UPDATE votes = ?; ");
+        //     pre.setString(1,voter.c_str());
+        //     pre.setString(2,votes.c_str());
+        //     pre.setString(3,votes.c_str());
 
-            pre.execute();
-        }
+        //     pre.execute();
+        // }
 
 
-        if (action.name == N(delegatebw)) {
-            auto account = abi_data["receiver"].as<chain::name>().to_string();
-            auto cpu = abi_data["stake_cpu_quantity"].as<chain::asset>();
-            auto net = abi_data["stake_net_quantity"].as<chain::asset>();
+        // if (action.name == N(delegatebw)) {
+        //     auto account = abi_data["receiver"].as<chain::name>().to_string();
+        //     auto cpu = abi_data["stake_cpu_quantity"].as<chain::asset>();
+        //     auto net = abi_data["stake_net_quantity"].as<chain::asset>();
 
-            zdbcpp::Connection con = m_pool->get_connection();
-            assert(con);
+        //     zdbcpp::Connection con = m_pool->get_connection();
+        //     assert(con);
 
-            zdbcpp::PreparedStatement pre = con.prepareStatement("INSERT INTO stakes(account, cpu, net) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE cpu = ?, net = ? ;");
-            pre.setString(1,account.c_str());
-            pre.setDouble(2,cpu.to_real());
-            pre.setDouble(3,net.to_real());
-            pre.setDouble(4,cpu.to_real());
-            pre.setDouble(5,net.to_real());
+        //     zdbcpp::PreparedStatement pre = con.prepareStatement("INSERT INTO stakes(account, cpu, net) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE cpu = ?, net = ? ;");
+        //     pre.setString(1,account.c_str());
+        //     pre.setDouble(2,cpu.to_real());
+        //     pre.setDouble(3,net.to_real());
+        //     pre.setDouble(4,cpu.to_real());
+        //     pre.setDouble(5,net.to_real());
             
-            pre.execute();
-        }
-
-        // if (action.name == chain::setabi::get_name()) {
-        //     zdbcpp::Connection con = m_pool->get_connection();
-        //     assert(con);
-
-        //     chain::abi_def abi_setabi;
-        //     chain::setabi action_data = action.data_as<chain::setabi>();
-        //     chain::abi_serializer::to_abi(action_data.abi, abi_setabi);
-        //     string abi_string = fc::json::to_string(abi_setabi);
-
-        //     zdbcpp::PreparedStatement pre = con.prepareStatement("UPDATE accounts SET abi = ?, updated_at = NOW() WHERE name = ?");
-        //     pre.setString(1,abi_string.c_str());
-        //     pre.setString(2,action_data.account.to_string().c_str());
-                    
         //     pre.execute();
-        // } else if (action.name == chain::newaccount::get_name()) {
-        //     zdbcpp::Connection con = m_pool->get_connection();
-        //     assert(con);
-
-        //     auto action_data = action.data_as<chain::newaccount>();
-        //     zdbcpp::PreparedStatement pre = con.prepareStatement("INSERT INTO accounts (name) VALUES (?)");
-        //     pre.setString(1,action_data.name.to_string().c_str());
-
-        //     pre.execute();
-
-        //     for (const auto& key_owner : action_data.owner.keys) {
-        //         string permission_owner = "owner";
-        //         string public_key_owner = static_cast<string>(key_owner.key);
-        //         zdbcpp::PreparedStatement pre = con.prepareStatement("INSERT INTO accounts_keys(account, public_key, permission) VALUES (?,?,?) ");
-        //         pre.setString(1,action_data.name.to_string().c_str()),
-        //         pre.setString(2,public_key_owner.c_str());
-        //         pre.setString(3,permission_owner.c_str());
-
-        //         pre.execute();
-        //     }
-
-        //     for (const auto& key_active : action_data.active.keys) {
-        //         string permission_active = "active";
-        //         string public_key_active = static_cast<string>(key_active.key);
-
-        //         zdbcpp::PreparedStatement pre = con.prepareStatement("INSERT INTO accounts_keys(account, public_key, permission) VALUES (?,?,?) ");
-        //         pre.setString(1,action_data.name.to_string().c_str());
-        //         pre.setString(2,public_key_active.c_str());
-        //         pre.setString(3,permission_active.c_str());
-
-        //         pre.execute();
-        //     }
-
         // }
         
     } catch(std::exception& e){

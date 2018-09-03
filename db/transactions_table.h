@@ -14,7 +14,7 @@ public:
 
     void drop();
     void create();
-    void add(uint32_t block_id, chain::transaction transaction);
+    void add(uint32_t block_id, chain::transaction_receipt receipt, chain::transaction transaction);
 
 private:
     std::shared_ptr<connection_pool> m_pool;

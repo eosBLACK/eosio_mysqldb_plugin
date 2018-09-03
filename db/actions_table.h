@@ -6,6 +6,7 @@
 #include <fc/io/json.hpp>
 #include <fc/variant.hpp>
 
+#include <boost/chrono.hpp>
 #include <boost/uuid/uuid.hpp>
 #include <boost/uuid/uuid_io.hpp>
 #include <boost/uuid/uuid_generators.hpp>
@@ -29,8 +30,8 @@ public:
 
     void drop();
     void create();
-    void add(chain::action action, chain::transaction_id_type transaction_id, fc::time_point_sec transaction_time, int32_t seq);
-
+    int add(int parent_action_id, std::string receiver, chain::action action, chain::transaction_id_type transaction_id, int32_t seq);
+    
 private:
     std::shared_ptr<connection_pool> m_pool;
 

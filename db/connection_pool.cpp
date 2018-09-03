@@ -25,6 +25,7 @@ namespace eosio {
     connection_pool::connection_pool(const std::string& uri){
         m_pool = std::make_shared<zdbcpp::ConnectionPool>(uri);
         assert(m_pool);
+        m_pool->setInitialConnections(20);
         m_pool->start();
     }
 

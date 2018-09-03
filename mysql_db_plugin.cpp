@@ -80,6 +80,9 @@ public:
    void process_irreversible_block(const chain::block_state_ptr&);
    void _process_irreversible_block(const chain::block_state_ptr&);
 
+   bool add_action_trace( int parent_action_id, const chain::action_trace& atrace,
+                          bool executed, int32_t act_num );
+
    void init(const std::string& uri, uint32_t block_num_start);
    void wipe_database();
    bool is_started();
@@ -224,11 +227,17 @@ void mysql_db_plugin_impl::consume_accepted_transactions() {
          }
 
          // process transactions
+         auto start_time = fc::time_point::now();
+         auto size = transaction_trace_process_queue.size();
          while (!transaction_metadata_process_queue.empty()) {
             const auto& t = transaction_metadata_process_queue.front();
             process_accepted_transaction(t);
             transaction_metadata_process_queue.pop_front();
          }
+         auto time = fc::time_point::now() - start_time;
+         auto per = size > 0 ? time.count()/size : 0;
+         if( time > fc::microseconds(500000) ) // reduce logging, .5 secs
+            ilog( "process_applied_transaction,  time per: ${p}, size: ${s}, time: ${t}", ("s", size)("t", time)("p", per) );
 
          if( transaction_metadata_size == 0 &&
              done ) {
@@ -271,11 +280,17 @@ void mysql_db_plugin_impl::consume_applied_transactions() {
          }
 
          // process transactions
+         auto start_time = fc::time_point::now();
+         auto size = transaction_metadata_process_queue.size();
          while (!transaction_trace_process_queue.empty()) {
             const auto& t = transaction_trace_process_queue.front();
             process_applied_transaction(t);
             transaction_trace_process_queue.pop_front();
          }
+         auto time = fc::time_point::now() - start_time;
+         auto per = size > 0 ? time.count()/size : 0;
+         if( time > fc::microseconds(500000) ) // reduce logging, .5 secs
+            ilog( "process_accepted_transaction, time per: ${p}, size: ${s}, time: ${t}", ("s", size)( "t", time )( "p", per ));
 
          if( transaction_trace_size == 0 &&
              done ) {
@@ -326,19 +341,31 @@ void mysql_db_plugin_impl::consume_blocks() {
          }
 
          // process blocks
+         auto start_time = fc::time_point::now();
+         auto size = block_state_process_queue.size();
          while (!block_state_process_queue.empty()) {
             const auto& bs = block_state_process_queue.front();
             process_accepted_block( bs );
             block_state_process_queue.pop_front();
          }
+         auto time = fc::time_point::now() - start_time;
+         auto per = size > 0 ? time.count()/size : 0;
+         if( time > fc::microseconds(500000) ) // reduce logging, .5 secs
+            ilog( "process_accepted_block,       time per: ${p}, size: ${s}, time: ${t}", ("s", size)("t", time)("p", per) );
 
          // process irreversible blocks
+         start_time = fc::time_point::now();
+         size = irreversible_block_state_process_queue.size();
          while (!irreversible_block_state_process_queue.empty()) {
             const auto& bs = irreversible_block_state_process_queue.front();
             process_irreversible_block(bs);
             irreversible_block_state_process_queue.pop_front();
          }
-
+         time = fc::time_point::now() - start_time;
+         per = size > 0 ? time.count()/size : 0;
+         if( time > fc::microseconds(500000) ) // reduce logging, .5 secs
+            ilog( "process_irreversible_block,   time per: ${p}, size: ${s}, time: ${t}", ("s", size)("t", time)("p", per) );
+            
          if( block_state_size == 0 &&
              irreversible_block_size == 0 &&
              done ) {
@@ -415,72 +442,100 @@ void mysql_db_plugin_impl::process_accepted_block( const chain::block_state_ptr&
    }
 }
 
-void mysql_db_plugin_impl::_process_accepted_transaction( const chain::transaction_metadata_ptr& t ) {
-   auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
-         std::chrono::microseconds{fc::time_point::now().time_since_epoch().count()});
-
-   const auto trx_id = t->id;
-   const auto trx_id_str = trx_id.str();
-   const auto& trx = t->trx;
-   const chain::transaction_header& trx_header = trx;
-
-   bool actions_to_write = false;
+bool mysql_db_plugin_impl::add_action_trace(int parent_action_id, const chain::action_trace& atrace,
+                                        bool executed, int32_t act_num )
+{
+   int p_action_id = parent_action_id;
+   const auto trx_id = atrace.trx_id;
    
-   int32_t act_num = 0;
-   auto process_action = [&](const std::string& trx_id_str, const chain::action& act, const  bool cfa) -> auto {
-      try {
-         m_accounts_table->update_account( act );
-      } catch (...) {
-         ilog( "Unable to update account for ${s}::${n}::${t}::${e}", ("s", act.account)( "n", act.name )( "t", trx_header )( "e", trx_header.expiration ));
-      }
-      if( start_block_reached ) {
-         m_actions_table->add(act, trx_id, trx_header.expiration, act_num);   
-         actions_to_write = true;
-      }
-       ++act_num;
-       return act_num;
-   };
+    if( executed && atrace.receipt.receiver == chain::config::system_account_name ) {
+      m_accounts_table->update_account( atrace.act );
+   }
+
+   bool added = false;
+   
 
    if( start_block_reached ) {
-      string signing_keys_json;
-      if( t->signing_keys.valid()) {
-         signing_keys_json = fc::json::to_string( t->signing_keys->second );
-      } else {
-         auto signing_keys = trx.get_signature_keys( *chain_id, false, false );
-         if( !signing_keys.empty()) {
-            signing_keys_json = fc::json::to_string( signing_keys );
-         }
-      }
-      string trx_header_json = fc::json::to_string( trx_header );
+      const chain::base_action_trace& base = atrace; // without inline action traces
+
+      p_action_id = m_actions_table->add(parent_action_id, atrace.receipt.receiver.to_string(), atrace.act, trx_id, act_num);   
+
+      added = true;
    }
 
-   if( !trx.actions.empty()) {
-      for( const auto& act : trx.actions ) {
-         process_action( trx_id_str, act, false );
-      }
+   for( const auto& iline_atrace : atrace.inline_traces ) {
+      added |= add_action_trace( p_action_id, iline_atrace, executed, act_num );
    }
 
-   if( start_block_reached ) {
-      act_num = 0;
-      if( !trx.context_free_actions.empty()) {
-         for( const auto& cfa : trx.context_free_actions ) {
-            process_action( trx_id_str, cfa, true );
-         }
-      }
-   }
+   return added;
+}
+
+void mysql_db_plugin_impl::_process_accepted_transaction( const chain::transaction_metadata_ptr& t ) {
+   auto now = std::chrono::seconds{fc::time_point::now().time_since_epoch().count()};
+
+   // const auto trx_id = t->id;
+   // const auto trx_id_str = trx_id.str();
+   // const auto& trx = t->trx;
+   // const chain::transaction_header& trx_header = trx;
+
+   // bool actions_to_write = false;
+   
+   // int32_t act_num = 0;
+   // auto process_action = [&](const std::string& trx_id_str, const chain::action& act, const  bool cfa) -> auto {
+   //    try {
+   //       m_accounts_table->update_account( act );
+   //    } catch (...) {
+   //       ilog( "Unable to update account for ${s}::${n}::${t}::${e}", ("s", act.account)( "n", act.name )( "t", trx_header )( "e", trx_header.expiration ));
+   //    }
+   //    if( start_block_reached ) {
+   //       m_actions_table->add(act, trx_id, trx_header.expiration, act_num);   
+   //       actions_to_write = true;
+   //    }
+   //     ++act_num;
+   //     return act_num;
+   // };
+
+   // if( start_block_reached ) {
+   //    string signing_keys_json;
+   //    if( t->signing_keys.valid()) {
+   //       signing_keys_json = fc::json::to_string( t->signing_keys->second );
+   //    } else {
+   //       auto signing_keys = trx.get_signature_keys( *chain_id, false, false );
+   //       if( !signing_keys.empty()) {
+   //          signing_keys_json = fc::json::to_string( signing_keys );
+   //       }
+   //    }
+   //    string trx_header_json = fc::json::to_string( trx_header );
+   // }
+
 }
 
 void mysql_db_plugin_impl::_process_applied_transaction( const chain::transaction_trace_ptr& t ) {
    auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
          std::chrono::microseconds{fc::time_point::now().time_since_epoch().count()});
+   bool write_atraces = false;
+   bool executed = t->receipt.valid() && t->receipt->status == chain::transaction_receipt_header::executed;
 
+   int32_t act_num = 0;
+   for( const auto& atrace : t->action_traces ) {
+      try {
+         write_atraces |= add_action_trace( 0, atrace, executed, act_num );
+         ++act_num;
+      } catch(...) {
+         wlog("add action traces failed.");
+      }
+   }
+
+   if( !start_block_reached ) return;
+   if( !write_atraces ) return; //< do not insert transaction_trace if all action_traces filtered out
 }
 
 void mysql_db_plugin_impl::_process_accepted_block( const chain::block_state_ptr& block ) {
    try {      
       m_blocks_table->add(block->block);
+      int trx_no = 0;
       for (const auto &transaction : block->trxs) {
-            m_transactions_table->add(block->block_num, transaction->trx);
+            m_transactions_table->add(block->block_num, block->block->transactions.at(trx_no++), transaction->trx);
       }
     } catch (const std::exception &ex) {
         elog("${e}", ("e", ex.what())); // prevent crash
@@ -501,6 +556,7 @@ void mysql_db_plugin_impl::_process_irreversible_block(const chain::block_state_
 
    try {      
       m_blocks_table->process_irreversible(block->block);
+
    } catch (const std::exception &ex) {
         elog("${e}", ("e", ex.what())); // prevent crash
     }
