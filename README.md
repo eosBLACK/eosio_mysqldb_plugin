@@ -40,12 +40,16 @@ $ nodeos --help
 
 ....
 Config Options for eosio::mysql_db_plugin:
-    --mysqldb-wipe = true               if true, wipe all tables from database
-    --mysqldb-queue-size  arg (=256)    The queue size between nodeos and MySQL 
-                                        DB plugin thread.
-    --mysqldb-uri = arg                 MySQL DB URI connection string.
-                                        If not specified then plugin is disabled. 
-                                        Database name has to be specified.
-                                        e.g. mysql://<host-ip>:3306/<db name>?user=<user>&password=<password>
+    --mysqldb-wipe = true                 if true, wipe all tables from database
+    --mysqldb-queue-size  arg (=256)      The queue size between nodeos and MySQL 
+                                          DB plugin thread.
+    --mysqldb-host = arg                  MySQL DB host address.
+                                          If not specified then plugin is disabled. 
+                                          e.g. 127.0.0.1
+    --mysqldb-port = <port no.>           port number e.g. 3306
+    --mysqldb-user = <user name>
+    --mysqldb-passwd = <password>
+    --mysqldb-database = <database name>
+    --mysqldb-max-connection = arg (=20)  max connection pool size.
 ....
 ```
