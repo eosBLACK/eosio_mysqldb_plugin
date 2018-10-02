@@ -27,9 +27,9 @@ public:
 
     void drop();
     void create();
-    void update_account(chain::action action);
+    void update_account(chain::action action,string trx_id);
     void add(string name);
-    bool exist(string name);
+    void add(string name,string creator,string trx_id);
 
     void add_account_control(const chain::vector<chain::permission_level_weight>& controlling_accounts,
                             const std::string& name, const permission_name& permission,

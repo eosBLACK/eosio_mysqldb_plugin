@@ -22,6 +22,8 @@ public:
     void create();
     void add(chain::signed_block_ptr block);
     void process_irreversible(chain::signed_block_ptr block);
+    void createBlockStatement(chain::signed_block_ptr block,std::string* stmt_block);
+    void executeBlocks(std::string sql_blocks, std::string sql_transactions);
 private:
     std::shared_ptr<connection_pool> m_pool;
 };

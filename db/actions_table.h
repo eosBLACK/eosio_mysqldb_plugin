@@ -30,8 +30,16 @@ public:
 
     void drop();
     void create();
-    int add(int parent_action_id, std::string receiver, chain::action action, chain::transaction_id_type transaction_id, int32_t seq);
-    
+    int add(int parent_action_id, std::string receiver, chain::action action, chain::transaction_id_type transaction_id, uint32_t seq);
+    uint32_t get_max_id();
+    uint32_t get_max_id_raw();
+
+    std::string get_abi_from_account(std::string account_name);
+    void createInsertStatement_actions(uint32_t action_id, uint32_t parent_action_id, std::string receiver, chain::action action, chain::transaction_id_type transaction_id, uint32_t seq, std::string* stmt_actions, std::string* stmt_actions_account);
+    void createInsertStatement_actions_raw(uint32_t action_id, uint32_t parent_action_id, std::string receiver, chain::action action, chain::transaction_id_type transaction_id, uint32_t seq, std::string* stmt_actions, std::string* stmt_actions_account);
+    void createInsertStatement_actions_accounts();
+    void executeActions(std::string sql_actions, std::string sql_actions_account);
+    bool generate_actions_table(const uint32_t from_id);
 private:
     std::shared_ptr<connection_pool> m_pool;
 

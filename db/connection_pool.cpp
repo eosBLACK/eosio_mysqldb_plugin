@@ -4,47 +4,36 @@
 #include <assert.h>
 #include <fc/log/logger.hpp>
 #include "connection_pool.h"
-
-using namespace zdbcpp;
+#include "mysqlconn.h"
 
 #define BSIZE 2048
 
-#if HAVE_STRUCT_TM_TM_GMTOFF
-#define TM_GMTOFF tm_gmtoff
-#else
-#define TM_GMTOFF tm_wday
-#endif
-
-static void TabortHandler(const char *error) {
-        fprintf(stdout, "Error: %s\n", error);
-        exit(1);
-}
-
 namespace eosio {
 
-    connection_pool::connection_pool(const std::string& uri){
-        m_pool = std::make_shared<zdbcpp::ConnectionPool>(uri);
-        assert(m_pool);
-        m_pool->setInitialConnections(20);
-        m_pool->start();
+    connection_pool::connection_pool(const std::string host, const std::string user, const std::string passwd, const std::string database, const uint16_t port, const uint16_t max_conn) :
+    m_pool(max_conn,host,user,passwd,database,port)
+    {
+        std::cout << max_conn << ", " 
+            << host << ", "
+            << user << ", "
+            << passwd << ", "
+            << database << ", "
+            << port << std::endl; 
+            
+        if(!m_pool.checkConnection())
+            ilog("not connected");
     }
 
     connection_pool::~connection_pool()
     {
-        assert(m_pool);
-        m_pool->stop();
-        URL_free(&uri);
+        
     }
 
-    Connection connection_pool::get_connection() {
-        assert(m_pool);
-
-        return m_pool->getConnection();
+    shared_ptr<MysqlConnection> connection_pool::get_connection() {
+        return m_pool.lockConnection();
     }
 
-    void connection_pool::release_connection(zdbcpp::Connection& con) {
-        assert(m_pool);
-        assert(con);
-        // m_pool->returnConnection(con);
+    void connection_pool::release_connection(MysqlConnection& con) {
+        con.unlock();
     }
 }

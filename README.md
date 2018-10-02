@@ -1,11 +1,23 @@
 # eosio_mysql_plugin
 
-EOSIO plugin to register blockchain data into an MySQL database supported by libzdb ( https://www.tildeslash.com/libzdb/ )
+EOSIO plugin to register blockchain data into an MySQL database.
 
-**You need to compile EOSIO from source: additional plugins are linked statically**
+## Requirements
+- Works on any EOSIO node that runs v1.1.0 and up.
 
+## Building the plugin [Install on your nodeos server]
+### EOSIO v1.2.0 and up
+You need to statically link this plugin with nodeos. To do that, pass the following flag to cmake command when building eosio:
+```
+-DEOSIO_ADDITIONAL_PLUGINS=<path-to-eosio-mysqldb-plugin>
+```
+### EOSIO v1.1.0 and up
+1. Remove or comment out this line in CMakeLists.txt:
+```
+eosio_additional_plugin(mysql_db_plugin)
+```
 
-
+2. Copy this repo to `<eosio-source-dir>/plugins/` You should now have `<eosio-source-dir>/plugins/mysql_db_plugin`
 add the following param on eosio_build.sh:
 ```
 -DBUILD_MYSQL_DB_PLUGIN=true

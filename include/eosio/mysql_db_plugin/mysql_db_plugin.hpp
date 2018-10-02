@@ -37,6 +37,8 @@ public:
    void plugin_startup();
    void plugin_shutdown();
 
+   void consume_actions_processed();
+
 private:
    mysql_db_plugin_impl_ptr my;
 };

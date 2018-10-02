@@ -20,6 +20,7 @@
 #include <boost/thread/condition_variable.hpp>
 
 #include <queue>
+#include <sstream>
 
 #include <future>
 
@@ -36,6 +37,7 @@
  * libzdb connection pool unity tests. 
  */
 #define BSIZE 2048
+#define MAX_ACTION_THREAD 1
 
 namespace fc { class variant; }
 
@@ -66,6 +68,7 @@ public:
    void consume_accepted_transactions();
    void consume_applied_transactions();
    void consume_blocks();
+   void consume_actions_processed();
 
    void accepted_block( const chain::block_state_ptr& );
    void applied_irreversible_block(const chain::block_state_ptr&);
@@ -80,12 +83,11 @@ public:
    void process_irreversible_block(const chain::block_state_ptr&);
    void _process_irreversible_block(const chain::block_state_ptr&);
 
-   bool add_action_trace( int parent_action_id, const chain::action_trace& atrace,
-                          bool executed, int32_t act_num );
+   bool add_action_trace( uint32_t action_id, uint32_t parent_action_id, const chain::action_trace& atrace,
+                          bool executed, uint32_t act_num, std::string* qry_actions, std::string* qry_actions_account );
 
-   void init(const std::string& uri, uint32_t block_num_start);
+   void init(const std::string host, const std::string user, const std::string passwd, const std::string database, const uint16_t port, const uint16_t max_conn, uint32_t block_num_start);
    void wipe_database();
-   bool is_started();
 
    bool configured{false};
    bool wipe_database_on_startup{false};
@@ -107,16 +109,21 @@ public:
    std::deque<chain::transaction_metadata_ptr> transaction_metadata_queue;
    std::deque<chain::transaction_metadata_ptr> transaction_metadata_process_queue;
    std::deque<chain::transaction_trace_ptr> transaction_trace_queue;
-   std::deque<chain::transaction_trace_ptr> transaction_trace_process_queue;
+   // std::deque<chain::transaction_trace_ptr> transaction_trace_process_queue;
    std::deque<chain::block_state_ptr> block_state_queue;
    std::deque<chain::block_state_ptr> block_state_process_queue;
    std::deque<chain::block_state_ptr> irreversible_block_state_queue;
    std::deque<chain::block_state_ptr> irreversible_block_state_process_queue;
    boost::mutex mtx;
+   boost::mutex mtx_applied_trans;
+   boost::mutex mtx_action_id;
+   boost::mutex mtx_action_processed;
    boost::condition_variable condition;
    boost::thread consume_thread_accepted_trans;
    boost::thread consume_thread_applied_trans;
+//    boost::thread consume_thread_applied_trans[10];
    boost::thread consume_thread_blocks;
+   boost::thread consume_thread_actions;
    boost::atomic<bool> done{false};
    boost::atomic<bool> startup{true};
    fc::optional<chain::chain_id_type> chain_id;
@@ -124,6 +131,8 @@ public:
 
    static const account_name newaccount;
    static const account_name setabi;
+
+   uint32_t m_action_id = 0;
 };
 
 namespace {
@@ -167,7 +176,7 @@ void mysql_db_plugin_impl::accepted_transaction( const chain::transaction_metada
 
 void mysql_db_plugin_impl::applied_transaction( const chain::transaction_trace_ptr& t ) {
    try {
-      queue( mtx, condition, transaction_trace_queue, t, queue_size );
+      queue( mtx_applied_trans, condition, transaction_trace_queue, t, queue_size );
    } catch (fc::exception& e) {
       elog("FC Exception while applied_transaction ${e}", ("e", e.to_string()));
    } catch (std::exception& e) {
@@ -201,6 +210,39 @@ void mysql_db_plugin_impl::accepted_block( const chain::block_state_ptr& bs ) {
    }
 }
 
+void mysql_db_plugin_impl::consume_actions_processed() {
+   static bool b_inserted = true;
+   int32_t max_raw_id = 0;
+   int32_t last_action_id = 0;
+
+   try {
+      while(true) {
+         boost::mutex::scoped_lock lock(mtx_action_processed);
+         while ( !b_inserted &&
+                 !done ) {
+            condition.wait(lock);
+         }
+
+         max_raw_id = m_actions_table->get_max_id_raw();
+         last_action_id = m_actions_table->get_max_id() - 1;
+
+         lock.unlock();              
+
+         if(last_action_id < max_raw_id) {
+            b_inserted = false;
+            b_inserted = m_actions_table->generate_actions_table(last_action_id);
+         }
+
+      //    ilog("max_raw_id : ${r},     last_action_id : ${a}",("r",max_raw_id)("a",last_action_id));
+         if( done ) {
+            break;
+         }
+      }
+   } catch (...) {
+      elog("Unknown exception while accepted_block");
+   }
+}
+
 void mysql_db_plugin_impl::consume_accepted_transactions() {
    try {
       while (true) {
@@ -228,7 +270,7 @@ void mysql_db_plugin_impl::consume_accepted_transactions() {
 
          // process transactions
          auto start_time = fc::time_point::now();
-         auto size = transaction_trace_process_queue.size();
+         auto size = transaction_metadata_process_queue.size();
          while (!transaction_metadata_process_queue.empty()) {
             const auto& t = transaction_metadata_process_queue.front();
             process_accepted_transaction(t);
@@ -237,7 +279,7 @@ void mysql_db_plugin_impl::consume_accepted_transactions() {
          auto time = fc::time_point::now() - start_time;
          auto per = size > 0 ? time.count()/size : 0;
          if( time > fc::microseconds(500000) ) // reduce logging, .5 secs
-            ilog( "process_applied_transaction,  time per: ${p}, size: ${s}, time: ${t}", ("s", size)("t", time)("p", per) );
+            ilog( "process_accepted_transaction,  time per: ${p}, size: ${s}, time: ${t}", ("s", size)("t", time)("p", per) );
 
          if( transaction_metadata_size == 0 &&
              done ) {
@@ -255,9 +297,11 @@ void mysql_db_plugin_impl::consume_accepted_transactions() {
 }
 
 void mysql_db_plugin_impl::consume_applied_transactions() {
+   std::deque<chain::transaction_trace_ptr> transaction_trace_process_queue;
+   
    try {
       while (true) {
-         boost::mutex::scoped_lock lock(mtx);
+         boost::mutex::scoped_lock lock(mtx_applied_trans);
          while ( transaction_trace_queue.empty() &&
                  !done ) {
             condition.wait(lock);
@@ -269,7 +313,7 @@ void mysql_db_plugin_impl::consume_applied_transactions() {
             transaction_trace_process_queue = move(transaction_trace_queue);
             transaction_trace_queue.clear();
          }
-         
+
          lock.unlock();
 
          // warn if queue size greater than 75%
@@ -281,7 +325,7 @@ void mysql_db_plugin_impl::consume_applied_transactions() {
 
          // process transactions
          auto start_time = fc::time_point::now();
-         auto size = transaction_metadata_process_queue.size();
+         auto size = transaction_trace_process_queue.size();
          while (!transaction_trace_process_queue.empty()) {
             const auto& t = transaction_trace_process_queue.front();
             process_applied_transaction(t);
@@ -290,7 +334,7 @@ void mysql_db_plugin_impl::consume_applied_transactions() {
          auto time = fc::time_point::now() - start_time;
          auto per = size > 0 ? time.count()/size : 0;
          if( time > fc::microseconds(500000) ) // reduce logging, .5 secs
-            ilog( "process_accepted_transaction, time per: ${p}, size: ${s}, time: ${t}", ("s", size)( "t", time )( "p", per ));
+            ilog( "process_applied_transaction, time per: ${p}, size: ${s}, time: ${t}", ("s", size)( "t", time )( "p", per ));
 
          if( transaction_trace_size == 0 &&
              done ) {
@@ -442,29 +486,44 @@ void mysql_db_plugin_impl::process_accepted_block( const chain::block_state_ptr&
    }
 }
 
-bool mysql_db_plugin_impl::add_action_trace(int parent_action_id, const chain::action_trace& atrace,
-                                        bool executed, int32_t act_num )
+bool mysql_db_plugin_impl::add_action_trace(uint32_t action_id, uint32_t parent_action_id, const chain::action_trace& atrace,
+                                        bool executed, uint32_t act_num, std::string* qry_actions, std::string* qry_actions_account )
 {
-   int p_action_id = parent_action_id;
+   uint32_t p_action_id = parent_action_id;
    const auto trx_id = atrace.trx_id;
-   
-    if( executed && atrace.receipt.receiver == chain::config::system_account_name ) {
-      m_accounts_table->update_account( atrace.act );
-   }
+   std::ostringstream oss_actions;
+   std::ostringstream oss_actions_account;
 
+   if( executed && atrace.receipt.receiver == chain::config::system_account_name ) {
+      m_accounts_table->update_account( atrace.act, trx_id );
+   }
    bool added = false;
-   
 
    if( start_block_reached ) {
       const chain::base_action_trace& base = atrace; // without inline action traces
+      std::string stmt_actions;
+      std::string stmt_actions_account;
 
-      p_action_id = m_actions_table->add(parent_action_id, atrace.receipt.receiver.to_string(), atrace.act, trx_id, act_num);   
+      // m_actions_table->createInsertStatement_actions(action_id, parent_action_id, atrace.receipt.receiver.to_string(), atrace.act, trx_id, act_num, &stmt_actions, &stmt_actions_account);
+      m_actions_table->createInsertStatement_actions_raw(action_id, parent_action_id, atrace.receipt.receiver.to_string(), atrace.act, trx_id, act_num, &stmt_actions, &stmt_actions_account);
+
+      oss_actions << stmt_actions;
+      oss_actions_account << stmt_actions_account << ";";
+      // p_action_id = m_actions_table->add(parent_action_id, atrace.receipt.receiver.to_string(), atrace.act, trx_id, act_num);   
 
       added = true;
    }
 
+   qry_actions->append(oss_actions.str());
+   qry_actions_account->append(oss_actions_account.str());
+
+   // uint32_t old_action_id = action_id;
    for( const auto& iline_atrace : atrace.inline_traces ) {
-      added |= add_action_trace( p_action_id, iline_atrace, executed, act_num );
+      boost::mutex::scoped_lock lock(mtx_action_id);
+      m_action_id++;
+      lock.unlock();
+      added |= add_action_trace( m_action_id, action_id, iline_atrace, executed, act_num, qry_actions, qry_actions_account );
+      
    }
 
    return added;
@@ -473,53 +532,29 @@ bool mysql_db_plugin_impl::add_action_trace(int parent_action_id, const chain::a
 void mysql_db_plugin_impl::_process_accepted_transaction( const chain::transaction_metadata_ptr& t ) {
    auto now = std::chrono::seconds{fc::time_point::now().time_since_epoch().count()};
 
-   // const auto trx_id = t->id;
-   // const auto trx_id_str = trx_id.str();
-   // const auto& trx = t->trx;
-   // const chain::transaction_header& trx_header = trx;
-
-   // bool actions_to_write = false;
    
-   // int32_t act_num = 0;
-   // auto process_action = [&](const std::string& trx_id_str, const chain::action& act, const  bool cfa) -> auto {
-   //    try {
-   //       m_accounts_table->update_account( act );
-   //    } catch (...) {
-   //       ilog( "Unable to update account for ${s}::${n}::${t}::${e}", ("s", act.account)( "n", act.name )( "t", trx_header )( "e", trx_header.expiration ));
-   //    }
-   //    if( start_block_reached ) {
-   //       m_actions_table->add(act, trx_id, trx_header.expiration, act_num);   
-   //       actions_to_write = true;
-   //    }
-   //     ++act_num;
-   //     return act_num;
-   // };
-
-   // if( start_block_reached ) {
-   //    string signing_keys_json;
-   //    if( t->signing_keys.valid()) {
-   //       signing_keys_json = fc::json::to_string( t->signing_keys->second );
-   //    } else {
-   //       auto signing_keys = trx.get_signature_keys( *chain_id, false, false );
-   //       if( !signing_keys.empty()) {
-   //          signing_keys_json = fc::json::to_string( signing_keys );
-   //       }
-   //    }
-   //    string trx_header_json = fc::json::to_string( trx_header );
-   // }
-
 }
 
 void mysql_db_plugin_impl::_process_applied_transaction( const chain::transaction_trace_ptr& t ) {
-   auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
-         std::chrono::microseconds{fc::time_point::now().time_since_epoch().count()});
    bool write_atraces = false;
    bool executed = t->receipt.valid() && t->receipt->status == chain::transaction_receipt_header::executed;
 
-   int32_t act_num = 0;
+   uint32_t act_num = 0;
+   std::string qry_actions;
+   std::string qry_actions_account;
+
+   m_transactions_table->add_trace(t->id,t->receipt->cpu_usage_us,t->receipt->net_usage_words,t->elapsed.count(),t->scheduled);
+   
+   auto start_time = fc::time_point::now();
+
    for( const auto& atrace : t->action_traces ) {
       try {
-         write_atraces |= add_action_trace( 0, atrace, executed, act_num );
+         if(m_action_id == 0)
+            return;
+         write_atraces |= add_action_trace( m_action_id, 0, atrace, executed, act_num, &qry_actions, &qry_actions_account );
+         boost::mutex::scoped_lock lock(mtx_action_id);
+         m_action_id++;
+         lock.unlock();
          ++act_num;
       } catch(...) {
          wlog("add action traces failed.");
@@ -528,18 +563,32 @@ void mysql_db_plugin_impl::_process_applied_transaction( const chain::transactio
 
    if( !start_block_reached ) return;
    if( !write_atraces ) return; //< do not insert transaction_trace if all action_traces filtered out
+
+   if(qry_actions.length() < 1) return;
+   
+   m_actions_table->executeActions(qry_actions,qry_actions_account);
+
+   auto time = fc::time_point::now() - start_time;
+   if( time > fc::microseconds(500000) )
+      ilog( "process actions, trans_id: ${r}    time: ${t}", ("r",t->id.str())("t", time) );
+
 }
 
 void mysql_db_plugin_impl::_process_accepted_block( const chain::block_state_ptr& block ) {
+   string qry_block;
+   string qry_transaction;
+
    try {      
-      m_blocks_table->add(block->block);
+      m_blocks_table->createBlockStatement(block->block, &qry_block);
       int trx_no = 0;
       for (const auto &transaction : block->trxs) {
-            m_transactions_table->add(block->block_num, block->block->transactions.at(trx_no++), transaction->trx);
+            m_transactions_table->createTransactionStatement(block->block_num, transaction->trx, &qry_transaction);
       }
     } catch (const std::exception &ex) {
         elog("${e}", ("e", ex.what())); // prevent crash
     }
+   
+   m_blocks_table->executeBlocks(qry_block,qry_transaction);
 }
 
 void mysql_db_plugin_impl::_process_irreversible_block(const chain::block_state_ptr& block)
@@ -555,7 +604,7 @@ void mysql_db_plugin_impl::_process_irreversible_block(const chain::block_state_
          std::chrono::microseconds{fc::time_point::now().time_since_epoch().count()});
 
    try {      
-      m_blocks_table->process_irreversible(block->block);
+      m_blocks_table->add(block->block);
 
    } catch (const std::exception &ex) {
         elog("${e}", ("e", ex.what())); // prevent crash
@@ -573,6 +622,7 @@ mysql_db_plugin_impl::~mysql_db_plugin_impl() {
          consume_thread_accepted_trans.join();
          consume_thread_applied_trans.join();
          consume_thread_blocks.join();
+         consume_thread_actions.join();
 
       } catch( std::exception& e ) {
          elog( "Exception on mysql_db_plugin shutdown of consume thread: ${e}", ("e", e.what()));
@@ -599,14 +649,10 @@ void mysql_db_plugin_impl::wipe_database() {
    m_accounts_table->add(system_account);
 }
 
-bool mysql_db_plugin_impl::is_started()
-{
-   return m_accounts_table->exist(system_account);
-}
+void mysql_db_plugin_impl::init(const std::string host, const std::string user, const std::string passwd, const std::string database, const uint16_t port, const uint16_t max_conn, uint32_t block_num_start) {
 
-void mysql_db_plugin_impl::init(const std::string& uri, uint32_t block_num_start) {
-
-   m_connection_pool = std::make_shared<connection_pool>(uri);
+   m_connection_pool = std::make_shared<connection_pool>(host, user, passwd, database, port, max_conn);
+   
    m_accounts_table = std::make_unique<accounts_table>(m_connection_pool);
    m_blocks_table = std::make_unique<blocks_table>(m_connection_pool);
    m_transactions_table = std::make_unique<transactions_table>(m_connection_pool);
@@ -618,11 +664,16 @@ void mysql_db_plugin_impl::init(const std::string& uri, uint32_t block_num_start
       wipe_database();
    }
 
+   // get last action_id from actions table
+   m_action_id = m_actions_table->get_max_id();
+
    ilog("starting mysql db plugin thread");
 
    consume_thread_accepted_trans = boost::thread([this] { consume_accepted_transactions(); });
    consume_thread_applied_trans = boost::thread([this] { consume_applied_transactions(); });
    consume_thread_blocks = boost::thread([this] { consume_blocks(); });
+   // Thread for process action table
+   consume_thread_actions = boost::thread([this] { consume_actions_processed(); });
 
    startup = false;
 }
@@ -651,12 +702,25 @@ void mysql_db_plugin::set_program_options(options_description&, options_descript
          "mysqlDB URI connection string."
                " If not specified then plugin is disabled. Default database 'EOS' is used if not specified in URI."
                " Example: mysql://localhost:3306/EOS?user=root&password=root")
+         ("mysqldb-host", bpo::value<std::string>(),
+         "mysqlDB host address string"
+         " Example: mysql://localhost:3306/EOS?user=root&password=root")
+         ("mysqldb-port", bpo::value<uint16_t>()->default_value(3306),
+         "mysqlDB port integer")
+         ("mysqldb-user", bpo::value<std::string>(),
+         "mysqlDB user id string")
+         ("mysqldb-passwd", bpo::value<std::string>(),
+         "mysqlDB user password string")
+         ("mysqldb-database", bpo::value<std::string>(),
+         "mysqlDB database name string")
+         ("mysqldb-max-connection", bpo::value<uint16_t>()->default_value(10),
+         "mysqlDB max connection")
          ;
 }
 
 void mysql_db_plugin::plugin_initialize(const variables_map& options) {
    try {
-      if( options.count( "mysqldb-uri" )) {
+      if( options.count( "mysqldb-host" )) {
          ilog( "initializing mysql_db_plugin" );
          my->configured = true;
 
@@ -685,9 +749,23 @@ void mysql_db_plugin::plugin_initialize(const variables_map& options) {
             my->start_block_reached = true;
          }
 
-         // TODO : create mysql db connection pool
-         std::string uri_str = options.at( "mysqldb-uri" ).as<std::string>();
-         ilog( "connecting to ${u}", ("u", uri_str));
+         uint16_t port = 3306;
+         uint16_t max_conn = 20;
+
+         // create mysql db connection pool
+         // std::string uri_str = options.at( "mysqldb-uri" ).as<std::string>();
+         std::string host_str = options.at("mysqldb-host").as<std::string>();
+         if( options.count( "mysqldb-port" )) {
+            port = options.at("mysqldb-port").as<uint16_t>();
+         }
+         std::string userid = options.at("mysqldb-user").as<std::string>();
+         std::string pwd = options.at("mysqldb-passwd").as<std::string>();
+         std::string database = options.at("mysqldb-database").as<std::string>();
+         if( options.count( "mysqldb-max-connection" )) {
+            max_conn = options.at("mysqldb-max-connection").as<uint16_t>();
+         }
+
+         ilog( "connecting to ${h} ${d} ${u} ${p}", ("h", host_str)("d", database)("u", userid)("p", port));
          
          // hook up to signals on controller
          chain_plugin* chain_plug = app().find_plugin<chain_plugin>();
@@ -695,9 +773,10 @@ void mysql_db_plugin::plugin_initialize(const variables_map& options) {
          auto& chain = chain_plug->chain();
          my->chain_id.emplace( chain.get_chain_id());
 
-         my->accepted_block_connection.emplace( chain.accepted_block.connect( [&]( const chain::block_state_ptr& bs ) {
-            my->accepted_block( bs );
-         } ));
+         my->accepted_block_connection.emplace( 
+               chain.accepted_block.connect( [&]( const chain::block_state_ptr& bs ) {
+                  my->accepted_block( bs );
+               } ));
          my->irreversible_block_connection.emplace(
                chain.irreversible_block.connect( [&]( const chain::block_state_ptr& bs ) {
                   my->applied_irreversible_block( bs );
@@ -710,7 +789,9 @@ void mysql_db_plugin::plugin_initialize(const variables_map& options) {
                chain.applied_transaction.connect( [&]( const chain::transaction_trace_ptr& t ) {
                   my->applied_transaction( t );
                } ));
-         my->init(uri_str,my->start_block_num);
+
+         my->init(host_str, userid, pwd, database, port, max_conn, my->start_block_num);
+         
       } else {
          wlog( "eosio::mysql_db_plugin configured, but no --mysqldb-uri specified." );
          wlog( "mysql_db_plugin disabled." );
