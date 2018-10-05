@@ -137,31 +137,32 @@ void transactions_table::add_trace(chain::transaction_id_type transaction_id, in
 
 void transactions_table::add(uint32_t block_id, chain::transaction_receipt receipt, chain::transaction transaction)
 {
-    const auto transaction_id_str = transaction.id().str();
-    const auto expiration = std::chrono::seconds{transaction.expiration.sec_since_epoch()}.count();
-    zdbcpp::Connection con = m_pool->get_connection();
-    assert(con);
-    try {
-        zdbcpp::PreparedStatement p1 = con.prepareStatement("INSERT INTO transactions(id, block_id, cpu_usage_us, net_usage_words, ref_block_num, ref_block_prefix,"
-            "expiration, pending, created_at, updated_at, num_actions) VALUES (?, ?, ?, ?, ?, ?, FROM_UNIXTIME(?), ?, FROM_UNIXTIME(?), FROM_UNIXTIME(?), ?)");
-        p1.setString(1,transaction_id_str.c_str()),
-        p1.setDouble(2,block_id),
-        p1.setDouble(3,receipt.cpu_usage_us),
-        p1.setDouble(4,receipt.net_usage_words),
-        p1.setDouble(5,transaction.ref_block_num),
-        p1.setDouble(6,transaction.ref_block_prefix),
-        p1.setDouble(7,expiration),
-        p1.setInt(8,0),
-        p1.setDouble(9,expiration),
-        p1.setDouble(10,expiration),
-        p1.setInt(11,transaction.total_actions());
+    // const auto transaction_id_str = transaction.id().str();
+    // const auto expiration = std::chrono::seconds{transaction.expiration.sec_since_epoch()}.count();
+    // shared_ptr<MysqlConnection> con = m_pool->get_connection();
+    // assert(con);
+    // std::ostringstream sql;
+    // try {
+    //     zdbcpp::PreparedStatement p1 = con.prepareStatement("INSERT INTO transactions(id, block_id, cpu_usage_us, net_usage_words, ref_block_num, ref_block_prefix,"
+    //         "expiration, pending, created_at, updated_at, num_actions) VALUES (?, ?, ?, ?, ?, ?, FROM_UNIXTIME(?), ?, FROM_UNIXTIME(?), FROM_UNIXTIME(?), ?)");
+    //     p1.setString(1,transaction_id_str.c_str()),
+    //     p1.setDouble(2,block_id),
+    //     p1.setDouble(3,receipt.cpu_usage_us),
+    //     p1.setDouble(4,receipt.net_usage_words),
+    //     p1.setDouble(5,transaction.ref_block_num),
+    //     p1.setDouble(6,transaction.ref_block_prefix),
+    //     p1.setDouble(7,expiration),
+    //     p1.setInt(8,0),
+    //     p1.setDouble(9,expiration),
+    //     p1.setDouble(10,expiration),
+    //     p1.setInt(11,transaction.total_actions());
 
-        p1.execute();
-    }
-    catch(std::exception& e){
-        wlog(e.what());
-    }
-    m_pool->release_connection(con);
+    //     p1.execute();
+    // }
+    // catch(std::exception& e){
+    //     wlog(e.what());
+    // }
+    // m_pool->release_connection(con);
 }
 
 } // namespace
