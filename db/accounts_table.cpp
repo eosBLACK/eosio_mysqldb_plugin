@@ -60,7 +60,7 @@ void accounts_table::create()
     shared_ptr<MysqlConnection> con = m_pool->get_connection();
     assert(con);
     try {
-        con->execute("CREATE TABLE accounts("
+        con->execute("CREATE TABLE IF NOT EXISTS accounts("
                     "name VARCHAR(12) PRIMARY KEY,"
                     "creator VARCHAR(12) DEFAULT NULL,"
                     "abi JSON DEFAULT NULL,"
@@ -68,7 +68,7 @@ void accounts_table::create()
                     "created_at DATETIME DEFAULT NOW(),"
                     "updated_at DATETIME DEFAULT NOW()) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE utf8mb4_general_ci;");
 
-        con->execute("CREATE TABLE accounts_keys("
+        con->execute("CREATE TABLE IF NOT EXISTS accounts_keys("
                 "account VARCHAR(12),"
                 "permission VARCHAR(12),"
                 "public_key VARCHAR(53)"
@@ -77,7 +77,7 @@ void accounts_table::create()
         con->execute("CREATE INDEX idx_accounts_keys ON accounts_keys (account,permission);");
         con->execute("CREATE INDEX idx_accounts_pubkey ON accounts_keys (public_key);");
 
-        con->execute("CREATE TABLE accounts_control("
+        con->execute("CREATE TABLE IF NOT EXISTS accounts_control("
                 "controlled_account VARCHAR(12), "
                 "controlled_permission VARCHAR(10), "
                 "controlling_account VARCHAR(12),"

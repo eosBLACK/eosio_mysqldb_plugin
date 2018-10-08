@@ -662,6 +662,16 @@ void mysql_db_plugin_impl::init(const std::string host, const std::string user, 
 
    if( wipe_database_on_startup ) {
       wipe_database();
+   } else {
+      ilog("create tables");
+
+      // create Tables
+      m_accounts_table->create();
+      m_blocks_table->create();
+      m_transactions_table->create();
+      m_actions_table->create();
+
+      m_accounts_table->add(system_account);
    }
 
    // get last action_id from actions table

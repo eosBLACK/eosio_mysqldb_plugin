@@ -32,7 +32,7 @@ void blocks_table::create()
     shared_ptr<MysqlConnection> con = m_pool->get_connection();
     assert(con);
     try {
-        con->execute("CREATE TABLE blocks("
+        con->execute("CREATE TABLE IF NOT EXISTS blocks("
             "id VARCHAR(64) PRIMARY KEY,"
             "block_number INT NOT NULL AUTO_INCREMENT,"
             "prev_block_id VARCHAR(64),"
