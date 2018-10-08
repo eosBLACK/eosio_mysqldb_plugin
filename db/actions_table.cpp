@@ -64,7 +64,7 @@ void actions_table::create()
     assert(con);
     
     try {
-        con->execute("CREATE TABLE actions_raw("
+        con->execute("CREATE TABLE IF NOT EXISTS actions_raw("
                 "id BIGINT(64) NOT NULL AUTO_INCREMENT PRIMARY KEY,"
                 "receiver VARCHAR(12),"
                 "account VARCHAR(12),"
@@ -80,7 +80,7 @@ void actions_table::create()
         con->execute("CREATE INDEX idx_actions_raw_tx_id ON actions_raw (transaction_id);");
         con->execute("CREATE INDEX idx_actions_raw_created ON actions_raw (created_at);");
 
-        con->execute("CREATE TABLE actions("
+        con->execute("CREATE TABLE IF NOT EXISTS actions("
                 "id BIGINT(64) NOT NULL AUTO_INCREMENT PRIMARY KEY,"
                 "receiver VARCHAR(12),"
                 "account VARCHAR(12),"
@@ -93,11 +93,11 @@ void actions_table::create()
                 "data JSON "
                 ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE utf8mb4_general_ci;");
 
-        con->execute("CREATE INDEX idx_actions_account ON actions (account);");
+        con->execute("CREATE INDEX idx_actions_account ON actions (account,receiver,action_name);");
         con->execute("CREATE INDEX idx_actions_tx_id ON actions (transaction_id);");
         con->execute("CREATE INDEX idx_actions_created ON actions (created_at);");
 
-        con->execute("CREATE TABLE actions_accounts("
+        con->execute("CREATE TABLE IF NOT EXISTS actions_accounts("
                 "actor VARCHAR(12),"
                 "permission VARCHAR(12),"
                 "action_id BIGINT(64) NOT NULL "
@@ -106,7 +106,7 @@ void actions_table::create()
         con->execute("CREATE INDEX idx_actions_actor ON actions_accounts (actor);");
         con->execute("CREATE INDEX idx_actions_action_id ON actions_accounts (action_id);");
 
-        con->execute("CREATE TABLE tokens("
+        con->execute("CREATE TABLE IF NOT EXISTS tokens("
                 "account VARCHAR(13),"
                 "symbol VARCHAR(10),"
                 "contract_owner VARCHAR(13),"
