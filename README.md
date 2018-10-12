@@ -4,6 +4,19 @@ EOSIO plugin to register blockchain data into an MySQL database.
 
 ## Requirements
 - Works on any EOSIO node that runs v1.1.0 and up.
+- On Ubuntu install the package libmysqlclient-dev
+```
+sudo apt install libmysqlclient-dev
+```
+
+- On OSX
+```
+brew install mysql-client
+# And Change CMakeLists.txt from
+include_directories(${CMAKE_CURRENT_SOURCE_DIR} include db mysqlconn /usr/include/mysql)
+# to
+include_directories(${CMAKE_CURRENT_SOURCE_DIR} include db mysqlconn /usr/local/opt/mysql-client/include/mysql)
+```
 
 ## Building the plugin [Install on your nodeos server]
 ### EOSIO v1.2.0 and up
