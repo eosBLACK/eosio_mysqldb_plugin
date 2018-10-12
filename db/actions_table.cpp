@@ -275,11 +275,22 @@ bool actions_table::generate_actions_table(const uint32_t from_id)
                         r_hex_data = r_data;
                         escaped_json_str = "";
                     }
+                } catch( std::exception& e ) {
+                    ilog( "Unable to convert action.data to ABI: ${s}::${n}, std what: ${e}",
+                          ("s", r_account)( "n", r_action_name )( "e", e.what()));
+                    r_hex_data = r_data;
+                    escaped_json_str = "";
                 } catch (fc::exception& e) {
                     if (i_action_name != N(onblock)) { // eosio::onblock not in original eosio.system abi
                         ilog( "Unable to convert action.data to ABI: ${s}::${n}, fc exception: ${e}",
-                            ("s", r_account)( "n", r_action_name )( "e", e.to_detail_string()));
+                              ("s", r_account)( "n", r_action_name )( "e", e.to_detail_string()));
                     }
+                    r_hex_data = r_data;
+                    escaped_json_str = "";
+                } catch( ... ) {
+                    ilog( "Unable to convert action.data to ABI: ${s}::${n}, unknown exception",
+                          ("s", r_account)( "n", r_action_name ));
+
                     r_hex_data = r_data;
                     escaped_json_str = "";
                 }
