@@ -10,6 +10,8 @@
 #include <eosio/chain/transaction.hpp>
 #include <eosio/chain/types.hpp>
 
+#include <eosio/chain_plugin/chain_plugin.hpp>
+
 #include <fc/io/json.hpp>
 #include <fc/utf8.hpp>
 #include <fc/variant.hpp>
@@ -20,7 +22,7 @@
 namespace eosio {
 
 #define MAX_JSON_LENGTH 250000
-#define MAX_ROW_SIZE    1000
+#define MAX_ROW_SIZE    100
 
 actions_table::actions_table(std::shared_ptr<connection_pool> pool):
     m_pool(pool)
@@ -245,10 +247,14 @@ bool actions_table::generate_actions_table(const uint32_t from_id)
 
                 try {
                     if(i_action_name != chain::setabi::get_name()) {                       
-                        abi_def_account = get_abi_from_account(r_account);
-                                                
-                        if (!abi_def_account.empty()) {
-                            abi = fc::json::from_string(abi_def_account).as<chain::abi_def>();
+                        // get abi definition from chain
+                        chain_plugin* chain_plug = app().find_plugin<chain_plugin>();
+                        EOS_ASSERT( chain_plug, chain::missing_chain_plugin_exception, ""  );
+                        auto& db = chain_plug->chain();
+                        abi = db.db().find<chain::account_object, chain::by_name>(chain::string_to_name(r_account.c_str()))->get_abi();
+
+                        if(!abi.version.empty()) {
+
                         } else if (r_account == chain::name( chain::config::system_account_name ).to_string()) {
                             abi = chain::eosio_contract_abi(abi);
                         } else {
@@ -258,7 +264,6 @@ bool actions_table::generate_actions_table(const uint32_t from_id)
                         abis.set_abi(abi, abi_serializer_max_time);      
 
                         const std::vector<char> v_data = fc::variant(r_data).as_blob().data;
-                        // std::vector<char> v_data(r_data.begin(),r_data.end());
                         auto abi_data = abis.binary_to_variant(abis.get_action_type(i_action_name), v_data, abi_serializer_max_time);
                         string json = fc::json::to_string(abi_data);
 
@@ -374,14 +379,11 @@ void actions_table::createInsertStatement_actions_raw(uint32_t action_id, uint32
                 }else{
                     fc::blob b_data;
                     b_data.data = action.data;
-                    // ilog("action data type : ${t} ",("t",fc::variant( b_data ).get_type()));
-                    escaped_json_str = fc::variant( b_data ).as_string();
-                    
+                    escaped_json_str = fc::variant( b_data ).as_string();                   
                 }
             } else {
                 fc::blob b_data;
                 b_data.data = action.data;
-                // ilog("action data type : ${t} ",("t",fc::variant( b_data ).get_type()));
                 escaped_json_str = fc::variant( b_data ).as_string();
             }
         } catch( std::exception& e ) {
@@ -404,7 +406,6 @@ void actions_table::createInsertStatement_actions_raw(uint32_t action_id, uint32
 
 
         std::ostringstream s_values;
-
 
         if(parent_action_id == 0 && seq == 0) {
             stmt_actions->append("INSERT INTO actions_raw(id, parent, receiver, account, seq, created_at, action_name, data, transaction_id) VALUES");
@@ -445,216 +446,9 @@ void actions_table::createInsertStatement_actions_raw(uint32_t action_id, uint32
         }
         return;
     } catch( fc::exception& e ) {
-        // ilog( "Unable to convert action abi_def to json for ${n}", ("n", setabi.account.to_string()));
+        wlog(e.what());
     }
 
-}
-
-void actions_table::createInsertStatement_actions(uint32_t action_id, uint32_t parent_action_id, std::string receiver, chain::action action, chain::transaction_id_type transaction_id, uint32_t seq, 
-                                                         std::string* stmt_actions, std::string* stmt_actions_account)
-{
-    chain::abi_def abi;
-    std::string abi_def_account;
-    chain::abi_serializer abis;
-    
-    auto transaction_time = std::chrono::seconds{fc::time_point::now().time_since_epoch().count()};
-
-    const auto transaction_id_str = transaction_id.str();
-    const auto expiration = transaction_time.count();
-    string m_account_name = action.account.to_string();
-    int max_field_size = 6500000;
-    string escaped_json_str;
-
-    try {
-        if(action.account == chain::config::system_account_name) {
-            if(action.name == chain::setabi::get_name()) {
-                auto setabi = action.data_as<chain::setabi>();
-                try {
-                    const chain::abi_def& abi_def = fc::raw::unpack<chain::abi_def>( setabi.abi );
-                    const string json_str = fc::json::to_string( abi_def );
-                    const string hex_data = "";
-
-                    shared_ptr<MysqlConnection> con = m_pool->get_connection();
-                    escaped_json_str = con->escapeString(json_str);
-                    m_pool->release_connection(*con);
-
-                    std::ostringstream s_values;
-
-                    if(parent_action_id == 0 && seq == 0) {
-                        stmt_actions->append("INSERT INTO actions(id, parent, receiver, account, seq, created_at, action_name, hex_data, data, transaction_id) VALUES");
-                        s_values << boost::format("('%1%', '%2%', '%3%', '%4%', '%5%', FROM_UNIXTIME(%6%), '%7%', '%8%', '%9%', '%10%')")
-                            % action_id
-                            % parent_action_id
-                            % receiver
-                            % m_account_name
-                            % seq
-                            % expiration
-                            % action.name.to_string()
-                            % hex_data
-                            % escaped_json_str
-                            % transaction_id_str;
-                        stmt_actions->append(s_values.str());
-                    } else {
-                        s_values << boost::format(",('%1%', '%2%', '%3%', '%4%', '%5%', FROM_UNIXTIME(%6%), '%7%', '%8%', '%9%', '%10%')")
-                            % action_id
-                            % parent_action_id
-                            % receiver
-                            % m_account_name
-                            % seq
-                            % expiration
-                            % action.name.to_string()
-                            % hex_data
-                            % escaped_json_str
-                            % transaction_id_str;
-                        stmt_actions->append(s_values.str());
-                    }
-
-                    s_values.str("");s_values.clear();
-                    stmt_actions_account->append("INSERT INTO actions_accounts(action_id, actor, permission) VALUES ");
-                    int cnt=0;
-                    for (const auto& auth : action.authorization) {
-                        string m_actor_name = auth.actor.to_string();
-                        if(cnt>0)
-                            s_values << boost::format(",('%1%','%2%','%3%')") % action_id % m_actor_name % auth.permission.to_string();
-                        else
-                            s_values << boost::format("('%1%','%2%','%3%')") % action_id % m_actor_name % auth.permission.to_string();
-                        stmt_actions_account->append(s_values.str());
-                        cnt++;
-                    }
-                    return;
-                } catch( fc::exception& e ) {
-                    ilog( "Unable to convert action abi_def to json for ${n}", ("n", setabi.account.to_string()));
-                }
-            }
-        }
-
-        abi_def_account = get_abi_from_account(m_account_name);
-        if(!abi_def_account.empty()){
-            if (!abi_def_account.empty()) {
-                abi = fc::json::from_string(abi_def_account).as<chain::abi_def>();
-            } else if (action.account == chain::config::system_account_name) {
-                abi = chain::eosio_contract_abi(abi);
-            } else {
-                return;
-            }
-            static const fc::microseconds abi_serializer_max_time(1000000); // 1 second
-            abis.set_abi(abi, abi_serializer_max_time);      
-
-            auto abi_data = abis.binary_to_variant(abis.get_action_type(action.name), action.data, abi_serializer_max_time);
-            string json = fc::json::to_string(abi_data);
-            const string hex_data = "";
-
-            shared_ptr<MysqlConnection> con = m_pool->get_connection();
-            string escaped_json_str = con->escapeString(json);
-            m_pool->release_connection(*con);
-            // char escaped_json_str[MAX_JSON_LENGTH];
-            // escape_mysql_string(json.c_str(),json.length(),escaped_json_str,MAX_JSON_LENGTH);
-
-            std::ostringstream s_values;
-
-            if(parent_action_id == 0 && seq == 0) {
-                stmt_actions->append("INSERT INTO actions(id, parent, receiver, account, seq, created_at, action_name, hex_data, data, transaction_id) VALUES");
-                s_values << boost::format("('%1%', '%2%', '%3%', '%4%', '%5%', FROM_UNIXTIME(%6%), '%7%', '%8%', '%9%', '%10%')")
-                    % action_id
-                    % parent_action_id
-                    % receiver
-                    % m_account_name
-                    % seq
-                    % expiration
-                    % action.name.to_string()
-                    % hex_data
-                    % escaped_json_str
-                    % transaction_id_str;
-                stmt_actions->append(s_values.str());
-            } else {
-                s_values << boost::format(",('%1%', '%2%', '%3%', '%4%', '%5%', FROM_UNIXTIME(%6%), '%7%', '%8%', '%9%', '%10%')")
-                    % action_id
-                    % parent_action_id
-                    % receiver
-                    % m_account_name
-                    % seq
-                    % expiration
-                    % action.name.to_string()
-                    % hex_data
-                    % escaped_json_str
-                    % transaction_id_str;
-                stmt_actions->append(s_values.str());
-            }
-
-            s_values.str("");s_values.clear();
-            stmt_actions_account->append("INSERT INTO actions_accounts(action_id, actor, permission) VALUES ");
-            int cnt=0;
-            for (const auto& auth : action.authorization) {
-                string m_actor_name = auth.actor.to_string();
-                if(cnt>0)
-                    s_values << boost::format(",('%1%','%2%','%3%')") % action_id % m_actor_name % auth.permission.to_string();
-                else
-                    s_values << boost::format("('%1%','%2%','%3%')") % action_id % m_actor_name % auth.permission.to_string();
-                stmt_actions_account->append(s_values.str());
-                cnt++;
-            }
-            parse_actions(action, abi_data);
-
-            return;
-        }
-
-    } catch( std::exception& e ) {
-        ilog( "Unable to convert action.data to ABI: ${s}::${n}, std what: ${e}",
-            ("s", action.account)( "n", action.name )( "e", e.what()));
-    } catch (fc::exception& e) {
-        if (action.name != "onblock") { // eosio::onblock not in original eosio.system abi
-            ilog( "Unable to convert action.data to ABI: ${s}::${n}, fc exception: ${e}",
-                ("s", action.account)( "n", action.name )( "e", e.to_detail_string()));
-        }
-    } catch( ... ) {
-        ilog( "Unable to convert action.data to ABI: ${s}::${n}, unknown exception",
-            ("s", action.account)( "n", action.name ));
-    }
-
-    string m_hex_data = fc::variant( action.data ).as_string();
-    const string json = "";
-    std::ostringstream s_values;
-
-    if(parent_action_id == 0 && seq == 0) {
-        stmt_actions->append("INSERT INTO actions(id, parent, receiver, account, seq, created_at, action_name, hex_data, data, transaction_id) VALUES");
-        s_values << boost::format("('%1%', '%2%', '%3%', '%4%', '%5%', FROM_UNIXTIME(%6%), '%7%', '%8%', NULL, '%9%')")
-            % action_id
-            % parent_action_id
-            % receiver
-            % m_account_name
-            % seq
-            % expiration
-            % action.name.to_string()
-            % m_hex_data
-            % transaction_id_str;
-        stmt_actions->append(s_values.str());
-    } else {
-        s_values << boost::format(",('%1%', '%2%', '%3%', '%4%', '%5%', FROM_UNIXTIME(%6%), '%7%', '%8%', NULL, '%9%')")
-            % action_id
-            % parent_action_id
-            % receiver
-            % m_account_name
-            % seq
-            % expiration
-            % action.name.to_string()
-            % m_hex_data
-            % transaction_id_str;
-        stmt_actions->append(s_values.str());
-    }
-
-    s_values.str("");s_values.clear();
-    stmt_actions_account->append("INSERT INTO actions_accounts(action_id, actor, permission) VALUES ");
-    int cnt=0;
-    for (const auto& auth : action.authorization) {
-        string m_actor_name = auth.actor.to_string();
-        if(cnt>0)
-            s_values << boost::format(",('%1%','%2%','%3%')") % action_id % m_actor_name % auth.permission.to_string();
-        else
-            s_values << boost::format("('%1%','%2%','%3%')") % action_id % m_actor_name % auth.permission.to_string();
-        stmt_actions_account->append(s_values.str());
-        cnt++;
-    }
-    return;
 }
 
 void actions_table::executeActions(std::string sql_actions, std::string sql_actions_account)

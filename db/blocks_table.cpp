@@ -34,7 +34,7 @@ void blocks_table::create()
     try {
         con->execute("CREATE TABLE IF NOT EXISTS blocks("
             "id VARCHAR(64) PRIMARY KEY,"
-            "block_number INT NOT NULL AUTO_INCREMENT,"
+            "block_number INT NOT NULL,"
             "prev_block_id VARCHAR(64),"
             "irreversible TINYINT(1) DEFAULT 0,"
             "timestamp DATETIME DEFAULT NOW(),"

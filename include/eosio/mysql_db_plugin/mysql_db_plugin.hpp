@@ -19,10 +19,6 @@ using mysql_db_plugin_impl_ptr = std::shared_ptr<class mysql_db_plugin_impl>;
  * blocks
  * transaction_traces
  * transactions
- *
- *   See data dictionary (DB Schema Definition - EOS API) for description of mySQL DB schema.
- *
- *   If cmake -DBUILD_MYSQL_DB_PLUGIN=true  not specified then this plugin not compiled/included.
  */
 class mysql_db_plugin : public plugin<mysql_db_plugin> {
 public:

@@ -32,13 +32,6 @@
 #include "blocks_table.h"
 #include "actions_table.h"
 
-
-/**
- * libzdb connection pool unity tests. 
- */
-#define BSIZE 2048
-#define MAX_ACTION_THREAD 1
-
 namespace fc { class variant; }
 
 namespace eosio {
@@ -138,22 +131,22 @@ public:
 namespace {
 
 template<typename Queue, typename Entry>
-void queue(boost::mutex& mtx, boost::condition_variable& condition, Queue& queue, const Entry& e, size_t queue_size) {
-   int sleep_time = 100;
-   size_t last_queue_size = 0;
+void queue(boost::mutex& mtx, boost::condition_variable& condition, Queue& queue, const Entry& e, size_t max_queue_size) {
+   int sleep_time = 0;
+   
    boost::mutex::scoped_lock lock(mtx);
-   if (queue.size() > queue_size) {
+   auto queue_size = queue.size();
+   if (queue_size > max_queue_size) {
       lock.unlock();
       condition.notify_one();
-      if (last_queue_size < queue.size()) {
-         sleep_time += 100;
-      } else {
-         sleep_time -= 100;
-         if (sleep_time < 0) sleep_time = 100;
-      }
-      last_queue_size = queue.size();
+      sleep_time += 10;
+      if( sleep_time > 1000 )
+         wlog("queue size: ${q}", ("q", queue_size));
       boost::this_thread::sleep_for(boost::chrono::milliseconds(sleep_time));
       lock.lock();
+   } else {
+      sleep_time -= 10;
+      if( sleep_time < 0 ) sleep_time = 0;
    }
    queue.emplace_back(e);
    lock.unlock();
@@ -233,7 +226,6 @@ void mysql_db_plugin_impl::consume_actions_processed() {
             b_inserted = m_actions_table->generate_actions_table(last_action_id);
          }
 
-      //    ilog("max_raw_id : ${r},     last_action_id : ${a}",("r",max_raw_id)("a",last_action_id));
          if( done ) {
             break;
          }
@@ -428,7 +420,6 @@ void mysql_db_plugin_impl::consume_blocks() {
 
 void mysql_db_plugin_impl::process_accepted_transaction( const chain::transaction_metadata_ptr& t ) {
    try {
-      // always call since we need to capture setabi on accounts even if not storing transactions
       _process_accepted_transaction(t);
    } catch (fc::exception& e) {
       elog("FC Exception while processing accepted transaction metadata: ${e}", ("e", e.to_detail_string()));
@@ -504,12 +495,10 @@ bool mysql_db_plugin_impl::add_action_trace(uint32_t action_id, uint32_t parent_
       std::string stmt_actions;
       std::string stmt_actions_account;
 
-      // m_actions_table->createInsertStatement_actions(action_id, parent_action_id, atrace.receipt.receiver.to_string(), atrace.act, trx_id, act_num, &stmt_actions, &stmt_actions_account);
       m_actions_table->createInsertStatement_actions_raw(action_id, parent_action_id, atrace.receipt.receiver.to_string(), atrace.act, trx_id, act_num, &stmt_actions, &stmt_actions_account);
 
       oss_actions << stmt_actions;
       oss_actions_account << stmt_actions_account << ";";
-      // p_action_id = m_actions_table->add(parent_action_id, atrace.receipt.receiver.to_string(), atrace.act, trx_id, act_num);   
 
       added = true;
    }
@@ -664,7 +653,7 @@ void mysql_db_plugin_impl::init(const std::string host, const std::string user, 
       wipe_database();
    } else {
       ilog("create tables");
-
+      
       // create Tables
       m_accounts_table->create();
       m_blocks_table->create();
@@ -679,7 +668,7 @@ void mysql_db_plugin_impl::init(const std::string host, const std::string user, 
 
    ilog("starting mysql db plugin thread");
 
-   consume_thread_accepted_trans = boost::thread([this] { consume_accepted_transactions(); });
+//    consume_thread_accepted_trans = boost::thread([this] { consume_accepted_transactions(); });
    consume_thread_applied_trans = boost::thread([this] { consume_applied_transactions(); });
    consume_thread_blocks = boost::thread([this] { consume_blocks(); });
    // Thread for process action table
@@ -763,7 +752,6 @@ void mysql_db_plugin::plugin_initialize(const variables_map& options) {
          uint16_t max_conn = 20;
 
          // create mysql db connection pool
-         // std::string uri_str = options.at( "mysqldb-uri" ).as<std::string>();
          std::string host_str = options.at("mysqldb-host").as<std::string>();
          if( options.count( "mysqldb-port" )) {
             port = options.at("mysqldb-port").as<uint16_t>();
@@ -791,10 +779,10 @@ void mysql_db_plugin::plugin_initialize(const variables_map& options) {
                chain.irreversible_block.connect( [&]( const chain::block_state_ptr& bs ) {
                   my->applied_irreversible_block( bs );
                } ));
-         my->accepted_transaction_connection.emplace(
-               chain.accepted_transaction.connect( [&]( const chain::transaction_metadata_ptr& t ) {
-                  my->accepted_transaction( t );
-               } ));
+      //    my->accepted_transaction_connection.emplace(
+      //          chain.accepted_transaction.connect( [&]( const chain::transaction_metadata_ptr& t ) {
+      //             my->accepted_transaction( t );
+      //          } ));
          my->applied_transaction_connection.emplace(
                chain.applied_transaction.connect( [&]( const chain::transaction_trace_ptr& t ) {
                   my->applied_transaction( t );
@@ -810,14 +798,13 @@ void mysql_db_plugin::plugin_initialize(const variables_map& options) {
 }
 
 void mysql_db_plugin::plugin_startup() {
-   // Make the magic happen
+
 }
 
 void mysql_db_plugin::plugin_shutdown() {
-   // OK, that's enough magic
    my->accepted_block_connection.reset();
    my->irreversible_block_connection.reset();
-   my->accepted_transaction_connection.reset();
+//    my->accepted_transaction_connection.reset();
    my->applied_transaction_connection.reset();
 
    my.reset();
