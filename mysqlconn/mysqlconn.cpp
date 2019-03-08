@@ -12,12 +12,12 @@ LockableObj::~LockableObj() {
 
 void LockableObj::unlock() {
     _cts.unlock(); 
-    //std::cout << "언락!!" << std::endl; 
+    // std::cout << "Unlock!! " << std::this_thread::get_id() << std::endl; 
 }
 
 void LockableObj::lock() {
     _cts.lock(); 
-    //std::cout << "락!!" << std::endl; 
+    // std::cout << "Lock!! " << std::this_thread::get_id() << std::endl; 
 }
 
 bool LockableObj::trylock() {
@@ -160,6 +160,11 @@ bool MysqlConnection::connect(
         return false; 
     }
 
+    // Force server character-set
+    exec("SET NAMES utf8mb4");
+    // Force timezone to UTC
+    exec("SET time_zone = '+00:00'");
+    
     return true; 
 
 }
@@ -227,11 +232,8 @@ bool MysqlConnection::exec(const string query, const bool multiline, my_ulonglon
 bool MysqlConnection::execute(const string query, const bool multiline, my_ulonglong* affectRowsPtr) const {
     if (transactionOnExecute) transactionStart(); 
     bool retVal = exec(query, multiline, affectRowsPtr); 
-    if (retVal) {
-        if (transactionOnExecute) transactionCommit(); 
-    } else {
-        if (transactionOnExecute) transactionRollback(); 
-    }
+    if (transactionOnExecute) transactionCommit(); 
+
     return retVal; 
 }
 
@@ -266,6 +268,11 @@ long long MysqlConnection::lastInsertID() const {
     }
 
     return retVal; 
+} 
+
+void  MysqlConnection::unlock(bool do_disconnect) {
+    if (do_disconnect) disconnect(); 
+    LockableObj::unlock(); 
 } 
 
 void MysqlConnection::lock() {
@@ -377,7 +384,7 @@ shared_ptr<MysqlConnection> MysqlConnPool::lockConnection() {
         retConn->connect(_host, _user, _passwd, _database, _port);
 
     while ( !retConn->is_connected()  || !retConn->ping() ) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        //std::this_thread::sleep_for(std::chrono::milliseconds(100));
         
         retConn->connect(_host, _user, _passwd, _database, _port);
     }

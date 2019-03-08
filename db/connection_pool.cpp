@@ -10,18 +10,23 @@
 
 namespace eosio {
 
-    connection_pool::connection_pool(const std::string host, const std::string user, const std::string passwd, const std::string database, const uint16_t port, const uint16_t max_conn) :
-    m_pool(max_conn,host,user,passwd,database,port)
+    connection_pool::connection_pool( 
+            const std::string host, const std::string user, const std::string passwd, const std::string database, 
+            const uint16_t port, const uint16_t max_conn, const bool do_closeconn_on_unlock):
+    m_pool(max_conn,host,user,passwd,database,port), _do_closeconn_on_unlock(do_closeconn_on_unlock)
     {
+        /*
         std::cout << max_conn << ", " 
             << host << ", "
             << user << ", "
             << passwd << ", "
             << database << ", "
             << port << std::endl; 
-            
-        if(!m_pool.checkConnection())
-            ilog("not connected");
+        */    
+        if(!m_pool.checkConnection()){
+            //ilog("not connected");
+            throw std::runtime_error( "Can't make connect to mysql!!" );
+        } 
     }
 
     connection_pool::~connection_pool()
@@ -34,6 +39,6 @@ namespace eosio {
     }
 
     void connection_pool::release_connection(MysqlConnection& con) {
-        con.unlock();
+        con.unlock(_do_closeconn_on_unlock);
     }
 }

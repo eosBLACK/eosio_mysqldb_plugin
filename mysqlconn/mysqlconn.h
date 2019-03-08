@@ -65,6 +65,7 @@ private:
 
 class MysqlConnection: public LockableObj {
 public:
+    //bool transactionOnExecute = false; 
     bool transactionOnExecute = true; 
 
     MysqlConnection(); 
@@ -97,6 +98,8 @@ public:
     void transactionRollback() const; 
 
     void print() const; 
+public:
+    void unlock(bool do_disconnect = false); 
 public:
     virtual void lock() override; 
     virtual bool trylock() override; 
