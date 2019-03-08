@@ -24,9 +24,32 @@ namespace eosio {
 #define MAX_JSON_LENGTH 250000
 #define MAX_ROW_SIZE    100
 
-actions_table::actions_table(std::shared_ptr<connection_pool> pool):
-    m_pool(pool)
+extern void post_query_str_to_queue(const std::string query_str);
+extern const int64_t get_now_tick();
+
+extern bool call_sp_proc_action_accs; 
+extern bool use_action_reversible; 
+
+
+//static const uint32_t ACTIONS_RAW_INSERT_COUNT      = 100 * 3; 
+//static const uint32_t ACTIONS_ACCOUNT_INSERT_COUNT  = 120 * 3;
+
+static const std::string ACTIONS_RAW_INSERT_STR =
+    // NOTICE!! INSERT is test. Use REPLACE when commit or release
+    //"INSERT IGNORE INTO actions(`id`,`parent`,`receiver`,`account`,`seq`,`created_at`,`action_name`,`hex_data`,`data`,`transaction_id`,`block_id`,`block_number`) VALUES ";
+    "REPLACE INTO actions(`id`,`parent`,`receiver`,`account`,`seq`,`created_at`,`action_name`,`hex_data`,`data`,`transaction_id`,`block_id`,`block_number`,`auth`) VALUES ";
+
+static const std::string ACTIONS_ACCOUNT_INSERT_STR = 
+    "INSERT IGNORE INTO actions_accounts(`action_id`,`actor`,`permission`) VALUES ";
+    //"REPLACE INTO actions_accounts_r(`action_id`,`transaction_id`,`block_number`,`actor`,`permission`) VALUES ";
+
+static const std::string ACTIONS_ACCOUNT_R_INSERT_STR = 
+    "REPLACE INTO actions_accounts_r(`action_id`,`transaction_id`,`block_number`,`actor`,`permission`) VALUES ";
+
+actions_table::actions_table(std::shared_ptr<connection_pool> pool, uint32_t raw_bulk_max_count, uint32_t account_bulk_max_count):
+    m_pool(pool), _raw_bulk_max_count(raw_bulk_max_count), _account_bulk_max_count(account_bulk_max_count)
 {
+    //std::cout << "call_sp_proc_action_accs: " << call_sp_proc_action_accs << std::endl; 
 
 }
 
@@ -34,98 +57,110 @@ void actions_table::drop()
 {
     
     shared_ptr<MysqlConnection> con = m_pool->get_connection();
-    con->print();
+    //con->print();
     assert(con);
-    ilog("actions_table : m_pool->get_connection succeeded");
+    //ilog("actions_table : m_pool->get_connection succeeded");
+    ilog(" wipe action tables");
     
     try {
+        con->execute("drop table IF EXISTS actions_accounts_r;");
         con->execute("drop table IF EXISTS actions_accounts;");
-        ilog("drop table IF EXISTS actions_accounts;");
-        con->execute("drop table IF EXISTS stakes;");
-        ilog("drop table IF EXISTS stakes;");
-        con->execute("drop table IF EXISTS votes;");
-        ilog("drop table IF EXISTS votes;");
-        con->execute("drop table IF EXISTS tokens;");
-        ilog("drop table IF EXISTS tokens;");
+        //ilog("drop table IF EXISTS actions_accounts;");
+        // con->execute("drop table IF EXISTS stakes;");
+        // ilog("drop table IF EXISTS stakes;");
+        // con->execute("drop table IF EXISTS votes;");
+        // ilog("drop table IF EXISTS votes;");
+        // con->execute("drop table IF EXISTS tokens;");
+        // ilog("drop table IF EXISTS tokens;");
         con->execute("drop table IF EXISTS actions;");
-        ilog("drop table IF EXISTS actions;");
-        con->execute("drop table IF EXISTS actions_raw;");
-        ilog("drop table IF EXISTS actions_raw;");
+        //ilog("drop table IF EXISTS actions;");
+        //con->execute("drop table IF EXISTS actions_raw;");
+        //ilog("drop table IF EXISTS actions_raw;");
     }
     catch(std::exception& e){
         wlog(e.what());
     }
 
     m_pool->release_connection(*con);
-    ilog("actions_table : m_pool->release_connection succeeded");
+    //ilog("actions_table : m_pool->release_connection succeeded");
 }
 
-void actions_table::create()
+void actions_table::create(const string engine)
 {
     shared_ptr<MysqlConnection> con = m_pool->get_connection();
     assert(con);
     
     try {
-        con->execute("CREATE TABLE IF NOT EXISTS actions_raw("
-                "id BIGINT(64) NOT NULL AUTO_INCREMENT PRIMARY KEY,"
-                "receiver VARCHAR(12),"
-                "account VARCHAR(12),"
-                "transaction_id VARCHAR(64),"
-                "seq SMALLINT,"
-                "parent BIGINT(64) DEFAULT NULL,"
-                "action_name VARCHAR(12),"
-                "created_at DATETIME DEFAULT NOW(),"
-                "data LONGTEXT "
-                ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE utf8mb4_general_ci;");
+        ilog(" create action tables");
 
-        con->execute("CREATE INDEX idx_actions_raw_account ON actions_raw (account);");
-        con->execute("CREATE INDEX idx_actions_raw_tx_id ON actions_raw (transaction_id);");
-        con->execute("CREATE INDEX idx_actions_raw_created ON actions_raw (created_at);");
+        std::ostringstream query; 
 
-        con->execute("CREATE TABLE IF NOT EXISTS actions("
-                "id BIGINT(64) NOT NULL AUTO_INCREMENT PRIMARY KEY,"
-                "receiver VARCHAR(12),"
-                "account VARCHAR(12),"
-                "transaction_id VARCHAR(64),"
-                "seq SMALLINT,"
-                "parent BIGINT(64) DEFAULT NULL,"
-                "action_name VARCHAR(12),"
-                "created_at DATETIME DEFAULT NOW(),"
-                "hex_data LONGTEXT, "
-                "data JSON "
-                ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE utf8mb4_general_ci;");
+        query << boost::format(
+            "CREATE TABLE IF NOT EXISTS `actions` ("
+                "`id` BIGINT(64) UNSIGNED NOT NULL,"
+                "`receiver` VARCHAR(12) NOT NULL,"
+                "`account` VARCHAR(12) NOT NULL,"
+                "`transaction_id` VARCHAR(64) NULL DEFAULT NULL,"
+                "`seq` SMALLINT(6) NOT NULL,"
+                "`parent` BIGINT(64) UNSIGNED NOT NULL,"
+                "`action_name` VARCHAR(13) NOT NULL,"
+                "`created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+                "`block_id` VARCHAR(64) NULL DEFAULT NULL,"
+                "`block_number` INT(10) UNSIGNED NOT NULL DEFAULT '0',"
+                "`hex_data` LONGTEXT NULL,"
+                "`data` JSON NULL DEFAULT NULL,"
+                "`auth` JSON NULL DEFAULT NULL,"
+                "PRIMARY KEY (`id`),"
+                "INDEX `idx_actions_receiver` (`receiver`),"
+                "INDEX `idx_actions_account` (`account`),"
+                "INDEX `idx_actions_name` (`action_name`),"
+                "INDEX `idx_actions_tx_id` (`transaction_id`),"
+                "INDEX `idx_actions_created` (`created_at`),"
+                "INDEX `idx_action_block_number` (`block_number`)"
+            ")"
+            "COLLATE='utf8mb4_general_ci'"
+            "ENGINE=%1%;\n"
+        ) % engine;
 
-        con->execute("CREATE INDEX idx_actions_account ON actions (account,receiver,action_name);");
-        con->execute("CREATE INDEX idx_actions_tx_id ON actions (transaction_id);");
-        con->execute("CREATE INDEX idx_actions_created ON actions (created_at);");
+        if (use_action_reversible) {
+            query << boost::format(
+                "CREATE TABLE IF NOT EXISTS `actions_accounts_r` ("
+                    "`action_id` BIGINT(64) NOT NULL,"
+                    "`transaction_id` VARCHAR(64) NOT NULL DEFAULT '',"
+                    "`block_number` INT(10) UNSIGNED NOT NULL,"
+                    "`actor` VARCHAR(12) NOT NULL,"
+                    "`permission` VARCHAR(13) NOT NULL,"
+                    "PRIMARY KEY (`action_id`, `transaction_id`, `actor`),"
+                    //"INDEX `idx_action_id` (`action_id`),"
+                    //"INDEX `idx_transaction_id` (`transaction_id`),"
+                    //"INDEX `idx_block_number` (`block_number`)"
+                    "INDEX `idx_actor` (`actor`)"
+                ")"
+                "COMMENT='reversible correct'"
+                "COLLATE='utf8mb4_general_ci'"
+                "ENGINE=%1%;\n"
+            ) % engine; 
+        }
 
-        con->execute("CREATE TABLE IF NOT EXISTS actions_accounts("
-                "actor VARCHAR(12),"
-                "permission VARCHAR(12),"
-                "action_id BIGINT(64) NOT NULL "
-                ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE utf8mb4_general_ci;");
 
-        con->execute("CREATE INDEX idx_actions_actor ON actions_accounts (actor);");
-        con->execute("CREATE INDEX idx_actions_action_id ON actions_accounts (action_id);");
+        query << boost::format(
+            "CREATE TABLE IF NOT EXISTS `actions_accounts` ("
+                //"`primary_id` INT(10) UNSIGNED NOT NULL AUTO_INCREMENT,"
+                "`primary_id` BIGINT(20) UNSIGNED NOT NULL AUTO_INCREMENT,"
+                "`action_id` BIGINT(64) NOT NULL,"
+                "`actor` VARCHAR(12) NOT NULL,"
+                "`permission` VARCHAR(13) NOT NULL,"
+                "PRIMARY KEY (`primary_id`),"
+                "INDEX `idx_action_id` (`action_id`),"
+                "INDEX `idx_actor` (`actor`)"
+            ")"
+            "COMMENT='irreversible arrange'"
+            "COLLATE='utf8mb4_general_ci'"
+            "ENGINE=%1%;\n"
+        ) % engine; 
 
-        con->execute("CREATE TABLE IF NOT EXISTS tokens("
-                "account VARCHAR(13),"
-                "symbol VARCHAR(10),"
-                "contract_owner VARCHAR(13),"
-                "PRIMARY KEY (account,symbol,contract_owner) "
-                ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE utf8mb4_general_ci;");
-        con->execute("CREATE INDEX idx_tokens_account ON tokens (account);");
+        con->execute( query.str() ); 
 
-        // con->execute("CREATE TABLE votes("
-        //         "account VARCHAR(13) PRIMARY KEY,"
-        //         "votes JSON"
-        //         ", UNIQUE KEY account (account)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE utf8mb4_general_ci;");
-
-        // con->execute("CREATE TABLE stakes("
-        //         "account VARCHAR(13) PRIMARY KEY,"
-        //         "cpu REAL(14,4),"
-        //         "net REAL(14,4) "
-        //         ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE utf8mb4_general_ci;");
     }
     catch(std::exception& e){
         wlog(e.what());
@@ -134,9 +169,11 @@ void actions_table::create()
     m_pool->release_connection(*con);
 }
 
-uint32_t actions_table::get_max_id()
+
+/*
+uint64_t actions_table::get_max_id()
 {
-    uint32_t last_action_id = 0;
+    uint64_t last_action_id = 0;
 
     shared_ptr<MysqlConnection> con = m_pool->get_connection();
     assert(con);
@@ -147,17 +184,18 @@ uint32_t actions_table::get_max_id()
     if(rset->is_valid()) {
         auto row = rset->next();
         if(row)
-            last_action_id = (uint32_t)std::stoull(row->get_value(0));
+            last_action_id = (uint64_t)std::stoull(row->get_value(0));
     }
     
     m_pool->release_connection(*con);
 
     return last_action_id;
 }
-
-uint32_t actions_table::get_max_id_raw()
+*/
+/*
+uint64_t actions_table::get_max_id_raw()
 {
-    uint32_t last_action_id = 0;
+    uint64_t last_action_id = 0;
 
     shared_ptr<MysqlConnection> con = m_pool->get_connection();
     assert(con);
@@ -168,376 +206,372 @@ uint32_t actions_table::get_max_id_raw()
     if(rset->is_valid()) {
         auto row = rset->next();
         if(row)
-            last_action_id = (uint32_t)std::stoull(row->get_value(0));
+            last_action_id = (uint64_t)std::stoull(row->get_value(0));
     }
     
     m_pool->release_connection(*con);
 
     return last_action_id;
 }
+*/
 
-std::string actions_table::get_abi_from_account(std::string account_name)
-{
-    std::string abi_def_account;
-
-    shared_ptr<MysqlConnection> con = m_pool->get_connection();
-    assert(con);
-    
-    std::ostringstream sql;
-    sql << boost::format("SELECT abi as `abi` FROM accounts WHERE `name` = '%1%'; ")
-    % account_name;
-    
-    shared_ptr<MysqlData> rset = con->open(sql.str());
-
-    if(rset->is_valid()) {
-        auto row = rset->next();
-        if(row)
-            abi_def_account = row->get_value(0);
-    }
-    // abi_def_account.append("\0");
-        
-    m_pool->release_connection(*con);
-
-    return abi_def_account;
-}
-
-bool actions_table::generate_actions_table(const uint32_t from_id)
-{
-    chain::abi_def abi;
-    std::string abi_def_account;
-    chain::abi_serializer abis;
-    string escaped_json_str;
-    
-    int row_count = from_id;
-    string r_hex_data;
-
-    shared_ptr<MysqlConnection> con = m_pool->get_connection();
-    assert(con);
-
-    try {
-        std::ostringstream s_values;
-        std::string sql = "SELECT id, parent, receiver, account, seq, DATE_FORMAT(created_at,'%Y-%m-%d %H:%i:%s') as created_at, action_name, data, transaction_id "
-                        "FROM actions_raw ";
-        s_values << boost::format(" WHERE id > %1% LIMIT %2%; ")
-        % from_id
-        % MAX_ROW_SIZE;
-        sql.append(s_values.str());
-
-        shared_ptr<MysqlData> rset = con->open(sql);
-        
-        if(rset){
-            std::string insert_sql = "INSERT INTO actions (id,parent,receiver,account,seq,created_at,action_name,hex_data,data,transaction_id) VALUES ";
-            string escaped_json_str;
-            int cnt = 0;
-
-            auto row = rset->next();
-            while(row)
-            {
-                auto r_id = row->get_value(0);
-                auto r_parent = row->get_value(1);
-                auto r_receiver = row->get_value(2);
-                auto r_account = row->get_value(3);
-                auto r_seq = row->get_value(4);
-                auto r_created_at = row->get_value(5);
-                auto r_action_name = row->get_value(6);
-                auto r_data = row->get_value(7);
-                auto r_transaction_id = row->get_value(8);
-                
-                chain::action_name i_action_name = chain::string_to_name(r_action_name.c_str());
-
-                try {
-                    if(i_action_name != chain::setabi::get_name()) {                       
-                        // get abi definition from chain
-                        chain_plugin* chain_plug = app().find_plugin<chain_plugin>();
-                        EOS_ASSERT( chain_plug, chain::missing_chain_plugin_exception, ""  );
-                        auto& db = chain_plug->chain();
-                        abi = db.db().find<chain::account_object, chain::by_name>(chain::string_to_name(r_account.c_str()))->get_abi();
-
-                        if(!abi.version.empty()) {
-
-                        } else if (r_account == chain::name( chain::config::system_account_name ).to_string()) {
-                            abi = chain::eosio_contract_abi(abi);
-                        } else {
-                            return true;
-                        }
-                        static const fc::microseconds abi_serializer_max_time(1000000); // 1 second
-                        abis.set_abi(abi, abi_serializer_max_time);      
-
-                        const std::vector<char> v_data = fc::variant(r_data).as_blob().data;
-                        auto abi_data = abis.binary_to_variant(abis.get_action_type(i_action_name), v_data, abi_serializer_max_time);
-                        string json = fc::json::to_string(abi_data);
-
-                        shared_ptr<MysqlConnection> con = m_pool->get_connection();
-                        escaped_json_str = con->escapeString(json);
-                        m_pool->release_connection(*con);                    
-                        r_hex_data = "";
-                    } else if(i_action_name == chain::setabi::get_name()) {
-                        shared_ptr<MysqlConnection> con = m_pool->get_connection();
-                        escaped_json_str = con->escapeString(r_data);
-                        m_pool->release_connection(*con);
-                        r_hex_data = "";
-                    } else {
-                        r_hex_data = r_data;
-                        escaped_json_str = "";
-                    }
-                } catch( std::exception& e ) {
-                    ilog( "Unable to convert action.data to ABI: ${s}::${n}, std what: ${e}",
-                          ("s", r_account)( "n", r_action_name )( "e", e.what()));
-                    r_hex_data = r_data;
-                    escaped_json_str = "";
-                } catch (fc::exception& e) {
-                    if (i_action_name != N(onblock)) { // eosio::onblock not in original eosio.system abi
-                        ilog( "Unable to convert action.data to ABI: ${s}::${n}, fc exception: ${e}",
-                              ("s", r_account)( "n", r_action_name )( "e", e.to_detail_string()));
-                    }
-                    r_hex_data = r_data;
-                    escaped_json_str = "";
-                } catch( ... ) {
-                    ilog( "Unable to convert action.data to ABI: ${s}::${n}, unknown exception",
-                          ("s", r_account)( "n", r_action_name ));
-
-                    r_hex_data = r_data;
-                    escaped_json_str = "";
-                }
-                
-                s_values.str("");s_values.clear();
-                if(cnt > 0)
-                    insert_sql.append(",");
-
-                if(escaped_json_str == "") {
-                    s_values << boost::format("('%1%', '%2%', '%3%', '%4%', '%5%', '%6%', '%7%', '%8%', NULL, '%9%')")
-                        % r_id
-                        % r_parent
-                        % r_receiver
-                        % r_account
-                        % r_seq
-                        % r_created_at
-                        % chain::name(i_action_name).to_string()
-                        % r_hex_data
-                        % r_transaction_id;
-                } else {
-                    s_values << boost::format("('%1%', '%2%', '%3%', '%4%', '%5%', '%6%', '%7%', '%8%', '%9%', '%10%')")
-                        % r_id
-                        % r_parent
-                        % r_receiver
-                        % r_account
-                        % r_seq
-                        % r_created_at
-                        % chain::name(i_action_name).to_string()
-                        % r_hex_data
-                        % escaped_json_str
-                        % r_transaction_id;
-                }
-                insert_sql.append(s_values.str());
-                cnt++;
-
-                row = rset->next();
-            }
-            if(cnt > 0) {
-
-                con->execute(insert_sql);
-            }
+// temporary function. For action_account table only. 
+void actions_table::add_act_acc_only(uint64_t action_id, chain::action action, chain::transaction_id_type transaction_id, uint32_t block_num) {
+    // action_account 테이블 인서트
+    const auto transaction_id_str = transaction_id.str();
+    for (const auto& auth : action.authorization) {
+        if (account_bulk_count > 0) {
+            account_bulk_sql << ", ";
         }
-    } catch (fc::exception& e) {
-        ilog("generate_actions_table failed fc exception: ${e}",( "e", e.to_detail_string()));
-    } catch (...) {
-        ilog(con->lastError());
+
+        //account_bulk_sql << boost::format(" ('%1%','%2%','%3%','%4%','%5%')") 
+        account_bulk_sql << boost::format(" ('%1%','%2%','%3%')") 
+            % action_id 
+            //% transaction_id_str
+            //% block_num
+            % auth.actor.to_string()
+            % auth.permission.to_string();
+
+        account_bulk_count++;
+        if (!account_bulk_insert_tick)
+            account_bulk_insert_tick = get_now_tick(); 
+        if (account_bulk_count >= _account_bulk_max_count) 
+            post_acc_query();
+
     }
 
-    m_pool->release_connection(*con);
-    return true;
 }
 
-void actions_table::createInsertStatement_actions_raw(uint32_t action_id, uint32_t parent_action_id, std::string receiver, chain::action action, chain::transaction_id_type transaction_id, uint32_t seq, 
-                                                         std::string* stmt_actions, std::string* stmt_actions_account)
+
+void actions_table::add_action(uint64_t action_id, uint64_t parent_action_id, const std::string receiver, 
+    chain::action action, chain::transaction_id_type transaction_id, 
+    const std::string block_id, uint32_t block_num, uint32_t seq
+)
+ 
 {
     chain::abi_def abi;
     std::string abi_def_account;
     chain::abi_serializer abis;
     
     const auto transaction_id_str = transaction_id.str();
-    string m_account_name = action.account.to_string();
+    const auto action_account_name = action.account.to_string();
     int max_field_size = 6500000;
     string escaped_json_str;
+    string hex_str;
+    string auth_json_str;
 
     try {
-        try {
-            if (action.account == chain::config::system_account_name) {
-                if (action.name == chain::setabi::get_name()) {
-                    auto setabi = action.data_as<chain::setabi>();
-                    try {
-                        const chain::abi_def &abi_def = fc::raw::unpack<chain::abi_def>(setabi.abi);
-                        const string json_str = fc::json::to_string(abi_def);
-                        
-                        shared_ptr <MysqlConnection> con = m_pool->get_connection();
-                        escaped_json_str = con->escapeString(json_str);
-                        m_pool->release_connection(*con);
-                     
-                    } catch (fc::exception &e) {
-                        ilog("Unable to convert action abi_def to json for ${n}", ("n", setabi.account.to_string()));
-                    }   
-                }else{
-                    fc::blob b_data;
-                    b_data.data = action.data;
-                    escaped_json_str = fc::variant( b_data ).as_string();                   
+        try {   
+
+            // if (!(action.name == chain::setabi::get_name())) return; 
+             /*
+            if (//action.account == chain::config::system_account_name &&
+                action.name == chain::setabi::get_name()) 
+            {
+                auto setabi = action.data_as<chain::setabi>();
+                try {
+                    const chain::abi_def &abi_def = fc::raw::unpack<chain::abi_def>(setabi.abi);
+                    const string json_str = fc::json::to_string(abi_def);
+                    
+                    shared_ptr <MysqlConnection> con = m_pool->get_connection();
+                    hex_str = "";
+                    escaped_json_str = con->escapeString(json_str);
+                    m_pool->release_connection(*con);
+                    
+                } catch (fc::exception &e) {
+                    ilog("Unable to convert action abi_def to json for ${n}", ("n", setabi.account.to_string()));
                 }
-            } else {
-                fc::blob b_data;
-                b_data.data = action.data;
-                escaped_json_str = fc::variant( b_data ).as_string();
-            }
+            } else 
+            // */
+            {
+                /*
+                if ( action.name == N(transfer) )
+                //if ( action.name != N(onblock) )
+                {
+                    std::cout 
+                        << action.account.to_string() << ", "
+                        << action.name.to_string()
+                        << std::endl; 
+
+                    std::cout 
+                        << "data:\n" 
+                        << fc::variant( action.data ).as_string()
+                        << std::endl; 
+
+                    fc::blob b_data;
+                    b_data.data = action.data; 
+                    
+                    std::cout 
+                        << "blob:\n" 
+                        << fc::variant( b_data ).as_string()
+                        << std::endl; 
+                    
+                }
+                // */
+
+                // get abi definition from chain
+
+                ///* // Do not return empty value... 
+                chain_plugin* chain_plug = app().find_plugin<chain_plugin>();
+                EOS_ASSERT( chain_plug, chain::missing_chain_plugin_exception, ""  );
+                auto& db = chain_plug->chain();
+                abi = db.db().find<chain::account_object, chain::by_name>(action.account)->get_abi();    
+
+                if (!abi.version.empty()) {
+                    static const fc::microseconds abi_serializer_max_time(1000000); // 1 second
+                    abis.set_abi(abi, abi_serializer_max_time);
+
+                    auto abi_data = abis.binary_to_variant(abis.get_action_type(action.name), action.data, abi_serializer_max_time);
+                    string json = fc::json::to_string(abi_data);
+                    
+                    shared_ptr<MysqlConnection> con = m_pool->get_connection();
+                    hex_str = "";
+                    escaped_json_str = con->escapeString(json);
+                    m_pool->release_connection(*con);
+                } else if (action.account == chain::config::system_account_name) {
+                    abi = chain::eosio_contract_abi(abi); 
+                } else {
+                    hex_str = fc::variant( action.data ).as_string();
+                    escaped_json_str = "";
+                }
+
+                // */
+
+                /*
+                chain_plugin* chain_plug = app().find_plugin<chain_plugin>();
+                EOS_ASSERT( chain_plug, chain::missing_chain_plugin_exception, ""  );
+                auto& db = chain_plug->chain();
+                chain::abi_def abi_chain = db.db().find<chain::account_object, chain::by_name>(action.account)->get_abi();    
+
+                if (!abi_chain.version.empty()) {
+                    abi = abi_chain;
+                } else if (action.account == chain::config::system_account_name) {
+                    abi = chain::eosio_contract_abi(abi); 
+                } else {
+                    return;         // no ABI no party. Should we still store it?
+                }
+
+                static const fc::microseconds abi_serializer_max_time(1000000); // 1 second
+                abis.set_abi(abi, abi_serializer_max_time);
+
+                auto abi_data = abis.binary_to_variant(abis.get_action_type(action.name), action.data, abi_serializer_max_time);
+                string json = fc::json::to_string(abi_data);
+                
+                shared_ptr<MysqlConnection> con = m_pool->get_connection();
+                hex_str = "";
+                escaped_json_str = con->escapeString(json);
+                m_pool->release_connection(*con);
+                // */
+                
+
+            }   
+
         } catch( std::exception& e ) {
-            ilog( "Unable to convert action.data to ABI: ${s}::${n}, std what: ${e}",
-                  ("s", action.account)( "n", action.name )( "e", e.what()));
-            escaped_json_str = fc::variant( action.data ).as_string();
+            // ilog( "Unable to convert action.data to ABI: ${s}::${n}, std what: ${e}",
+            //       ("s", action.account)( "n", action.name )( "e", e.what()));
+            hex_str = fc::variant( action.data ).as_string();
+            escaped_json_str = "";
         } catch (fc::exception& e) {
-            if (action.name != "onblock") { // eosio::onblock not in original eosio.system abi
-                ilog( "Unable to convert action.data to ABI: ${s}::${n}, fc exception: ${e}",
-                      ("s", action.account)( "n", action.name )( "e", e.to_detail_string()));
-            }
-
-            escaped_json_str = fc::variant( action.data ).as_string();
+            // if (action.name != "onblock") { // eosio::onblock not in original eosio.system abi
+            //     ilog( "Unable to convert action.data to ABI: ${s}::${n}, fc exception: ${e}",
+            //         ("s", action.account)( "n", action.name )( "e", e.to_detail_string()));
+            // }
+            hex_str = fc::variant( action.data ).as_string();
+            escaped_json_str = "";
         } catch( ... ) {
-            ilog( "Unable to convert action.data to ABI: ${s}::${n}, unknown exception",
-                  ("s", action.account)( "n", action.name ));
-
-            escaped_json_str = fc::variant( action.data ).as_string();
+            // ilog( "Unable to convert action.data to ABI: ${s}::${n}, unknown exception",
+            //       ("s", action.account)( "n", action.name ));
+            hex_str = fc::variant( action.data ).as_string();
+            escaped_json_str = "";
         }
 
 
-        std::ostringstream s_values;
+        // auth info
+        {
+            fc::variants auth_ar; 
+            for (const auto& auth : action.authorization) {
+                // Use for replay chain. Insert to actions_account table.
+                if (!call_sp_proc_action_accs) {
+                    if (account_bulk_count > 0) {
+                        account_bulk_sql << ", ";
+                    }
 
-        if(parent_action_id == 0 && seq == 0) {
-            stmt_actions->append("INSERT INTO actions_raw(id, parent, receiver, account, seq, created_at, action_name, data, transaction_id) VALUES");
-            s_values << boost::format("('%1%', '%2%', '%3%', '%4%', '%5%', CURRENT_TIMESTAMP, '%6%', '%7%', '%8%')")
-                % action_id
-                % parent_action_id
-                % receiver
-                % m_account_name
-                % seq
-                % action.name.to_string()
-                % escaped_json_str
-                % transaction_id_str;
-            stmt_actions->append(s_values.str());
-        } else {
-            s_values << boost::format(",('%1%', '%2%', '%3%', '%4%', '%5%', CURRENT_TIMESTAMP, '%6%', '%7%', '%8%')")
-                % action_id
-                % parent_action_id
-                % receiver
-                % m_account_name
-                % seq
-                % action.name.to_string()
-                % escaped_json_str
-                % transaction_id_str;
-            stmt_actions->append(s_values.str());
-        }
+                    //account_bulk_sql << boost::format(" ('%1%','%2%','%3%','%4%','%5%')") 
+                    account_bulk_sql << boost::format(" ('%1%','%2%','%3%')") 
+                        % action_id 
+                        //% transaction_id_str
+                        //% block_num
+                        % auth.actor.to_string()
+                        % auth.permission.to_string();
 
-        s_values.str("");s_values.clear();
-        stmt_actions_account->append("INSERT INTO actions_accounts(action_id, actor, permission) VALUES ");
-        int cnt=0;
-        for (const auto& auth : action.authorization) {
-            string m_actor_name = auth.actor.to_string();
-            if(cnt>0)
-                s_values << boost::format(",('%1%','%2%','%3%')") % action_id % m_actor_name % auth.permission.to_string();
-            else
-                s_values << boost::format("('%1%','%2%','%3%')") % action_id % m_actor_name % auth.permission.to_string();
-            stmt_actions_account->append(s_values.str());
-            cnt++;
-        }
-        return;
-    } catch( fc::exception& e ) {
-        wlog(e.what());
-    }
+                    account_bulk_count++;
+                    if (!account_bulk_insert_tick)
+                        account_bulk_insert_tick = get_now_tick(); 
+                    if (account_bulk_count >= _account_bulk_max_count) 
+                        post_acc_query();
 
-}
+                } else 
+                // Use for real working. Insert to actions_accounts_r table for history_api. 
+                if (use_action_reversible) {
+                    if (account_r_bulk_count > 0) {
+                        account_r_bulk_sql << ", ";
+                    }
 
-void actions_table::executeActions(std::string sql_actions, std::string sql_actions_account)
-{
-    shared_ptr<MysqlConnection> con = m_pool->get_connection();
-    assert(con);
-    
-    try {
-        if(sql_actions.length() > 0)
-            con->execute(sql_actions);
+                    account_r_bulk_sql << boost::format(" ('%1%','%2%','%3%','%4%','%5%')") 
+                        % action_id 
+                        % transaction_id_str
+                        % block_num
+                        % auth.actor.to_string()
+                        % auth.permission.to_string();
 
-        if(sql_actions_account.length() > 0)
-            con->execute(sql_actions_account);
+                    account_r_bulk_count++;
+                    if (!account_r_bulk_insert_tick)
+                        account_r_bulk_insert_tick = get_now_tick(); 
+                    if (account_r_bulk_count >= _account_bulk_max_count) 
+                        post_acc_r_query();
+                }
 
-    }
-    catch ( ... ) {
-        ilog("sql_actions = ${s}",("s",sql_actions));
-    }
-    
-    m_pool->release_connection(*con);
-}
 
-void actions_table::parse_actions(chain::action action, fc::variant abi_data)
-{
-    try {
-        if (action.name == N(issue) || action.name == N(transfer)) {
-            auto to_name = abi_data["to"].as<chain::name>().to_string();
-            auto asset_quantity = abi_data["quantity"].as<chain::asset>();
-            auto contract_owner = action.account.to_string();
-            int exist = 0;
+                // Generate JSON Information.
+                fc::mutable_variant_object auth_info =
+                    fc::mutable_variant_object()
+                    ("actor", auth.actor.to_string())
+                    ("permission", auth.permission.to_string())
+                    ;
 
+                auth_ar.push_back(auth_info); 
+                // std::cout 
+                //     << fc::json::to_string( auth_info ) 
+                //     << std::endl; 
+
+            }
+            // std::cout 
+            //     << fc::json::to_string( auth_ar ) 
+            //     << std::endl; 
             shared_ptr<MysqlConnection> con = m_pool->get_connection();
-            assert(con);
-            std::ostringstream sql;
-
-            // ignore if exists
-            sql << boost::format("INSERT IGNORE INTO tokens(account, symbol, contract_owner) VALUES ('%1%', '%2%', '%3%')")
-            % to_name.c_str()
-            % asset_quantity.get_symbol().name()
-            % contract_owner.c_str();
-            
-            con->execute(sql.str());
-
+            auth_json_str = con->escapeString( fc::json::to_string( auth_ar ) );
             m_pool->release_connection(*con);
         }
 
-        if (action.account != chain::name(chain::config::system_account_name)) {
-            return;
+        //auth_json_str = ""; 
+        // Insert to actions table
+        {
+            if (raw_bulk_count > 0) {
+                raw_bulk_sql << ", ";
+            }
+
+            raw_bulk_sql << boost::format("('%1%','%2%','%3%','%4%','%5%',CURRENT_TIMESTAMP,'%6%',%7%,%8%,'%9%','%10%','%11%',%12%)")
+                % action_id
+                % parent_action_id
+                % receiver
+                % action_account_name
+                % seq
+                % action.name.to_string()
+                % (escaped_json_str.length()? "NULL": "'" + hex_str + "'")
+                % (escaped_json_str.length()? "'" + escaped_json_str + "'":"NULL")
+                % transaction_id_str
+                % block_id
+                % block_num
+                % (auth_json_str.length()? "'" + auth_json_str + "'":"NULL");
+
+
+
+            raw_bulk_count++;
+            if (!raw_bulk_insert_tick)
+                raw_bulk_insert_tick = get_now_tick();
+            if (raw_bulk_count >= _raw_bulk_max_count)
+                post_raw_query();
+           
         }
 
-        // if (action.name == N(voteproducer)) {
-        //     auto voter = abi_data["voter"].as<chain::name>().to_string();
-        //     string votes = fc::json::to_string(abi_data["producers"]);
-
-        //     zdbcpp::Connection con = m_pool->get_connection();
-        //     assert(con);
-
-        //     zdbcpp::PreparedStatement pre = con.prepareStatement("INSERT INTO votes(account, votes) VALUES (?, ?) ON DUPLICATE KEY UPDATE votes = ?; ");
-        //     pre.setString(1,voter.c_str());
-        //     pre.setString(2,votes.c_str());
-        //     pre.setString(3,votes.c_str());
-
-        //     pre.execute();
-        // }
 
 
-        // if (action.name == N(delegatebw)) {
-        //     auto account = abi_data["receiver"].as<chain::name>().to_string();
-        //     auto cpu = abi_data["stake_cpu_quantity"].as<chain::asset>();
-        //     auto net = abi_data["stake_net_quantity"].as<chain::asset>();
-
-        //     zdbcpp::Connection con = m_pool->get_connection();
-        //     assert(con);
-
-        //     zdbcpp::PreparedStatement pre = con.prepareStatement("INSERT INTO stakes(account, cpu, net) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE cpu = ?, net = ? ;");
-        //     pre.setString(1,account.c_str());
-        //     pre.setDouble(2,cpu.to_real());
-        //     pre.setDouble(3,net.to_real());
-        //     pre.setDouble(4,cpu.to_real());
-        //     pre.setDouble(5,net.to_real());
-            
-        //     pre.execute();
-        // }
-        
-    } catch(std::exception& e){
+    } catch( fc::exception& e ) {
         wlog(e.what());
+    }    
+
+}
+void actions_table::finalize() {
+    post_raw_query();
+    post_acc_query();
+    post_acc_r_query();
+}
+
+void actions_table::tick(const int64_t tick) {
+    if (raw_bulk_insert_tick && ((tick - raw_bulk_insert_tick) > 5000 )) {
+        /*
+        std::cout << "action table tick ans save " 
+            << tick << ", " 
+            << tick - raw_bulk_insert_tick 
+            << std::endl; 
+        //*/
+        post_raw_query(); 
     }
 
-    // m_pool->release_connection(con);
+    if (account_bulk_insert_tick && ((tick - account_bulk_insert_tick) > 5000 )) {
+        /*
+        std::cout << "action acc table tick ans save " 
+            << tick << ", " 
+            << tick - account_bulk_insert_tick 
+            << std::endl; 
+        //*/
+        post_acc_query(); 
+    }
+
+    if (account_r_bulk_insert_tick && ((tick - account_r_bulk_insert_tick) > 5000 )) {
+        post_acc_r_query(); 
+    }
+
 }
+
+void actions_table::post_raw_query() {
+    if (raw_bulk_count) {
+        post_query_str_to_queue(
+            ACTIONS_RAW_INSERT_STR +
+            raw_bulk_sql.str()
+        ); 
+
+        raw_bulk_sql.str(""); raw_bulk_sql.clear(); 
+        raw_bulk_count = 0; 
+        raw_bulk_insert_tick = 0; 
+    }
+
+}
+
+void actions_table::post_acc_query() {
+    if (account_bulk_count) {
+        // std::cout 
+        //     << ACTIONS_ACCOUNT_INSERT_STR + account_bulk_sql.str()
+        //     << std::endl; 
+
+        post_query_str_to_queue(
+            ACTIONS_ACCOUNT_INSERT_STR +
+            account_bulk_sql.str()
+        ); 
+
+        account_bulk_sql.str(""); account_bulk_sql.clear(); 
+        account_bulk_count = 0; 
+        account_bulk_insert_tick = 0;
+    }
+}
+
+void actions_table::post_acc_r_query() {
+    if (account_r_bulk_count) {
+        // std::cout 
+        //     << ACTIONS_ACCOUNT_INSERT_STR + account_bulk_sql.str()
+        //     << std::endl; 
+
+        post_query_str_to_queue(
+            ACTIONS_ACCOUNT_R_INSERT_STR +
+            account_r_bulk_sql.str()
+        ); 
+
+        account_r_bulk_sql.str(""); account_r_bulk_sql.clear(); 
+        account_r_bulk_count = 0; 
+        account_r_bulk_insert_tick = 0;
+    }
+}
+
+
 
 } // namespace
