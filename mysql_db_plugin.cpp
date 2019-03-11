@@ -228,7 +228,13 @@ void mysql_db_plugin_impl::accepted_block( const chain::block_state_ptr& bs ) {
 
             //if (is_replaying) 
             {
+                wlog( "endblock reached. I'll shutdown this process." );
 
+                // quit the app
+                app().quit();
+                return; 
+
+            /*
                 wlog( "endblock reached. I'll shutdown this process. Sorry for Dirty flag." );
                 done = true;
 
@@ -242,10 +248,12 @@ void mysql_db_plugin_impl::accepted_block( const chain::block_state_ptr& bs ) {
                     consume_query_threads[i].join(); 
                 }
 
-                std::terminate();
+                //std::terminate();
                 //throw std::runtime_error( "Stop recording l!!" );
+                */
 
             }
+
 
             start_block_reached = false;
          }
